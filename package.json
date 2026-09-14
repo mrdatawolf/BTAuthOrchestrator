@@ -1,0 +1,22 @@
+{
+  "name": "bt-auth-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "dev": "npm run build && npm start",
+    "build": "tsc",
+    "seed": "npm run build && node scripts/seed.js",
+    "start": "node --env-file=.env dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.27",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "jose": "^6.2.4"
+  }
+}

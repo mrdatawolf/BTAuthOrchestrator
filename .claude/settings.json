@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p tasks/in-progress)",
+      "Bash(mv tasks/approved/TASK-003-contract-encrypted-storage.md tasks/in-progress/TASK-003-contract-encrypted-storage.md)"
+    ]
+  }
+}

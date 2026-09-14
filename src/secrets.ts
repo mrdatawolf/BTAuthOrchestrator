@@ -18,6 +18,7 @@ export interface SigningKeyInput {
 export interface SecretsStore {
   encryptValue(plaintext: Buffer, aad: string): EncryptedValue;
   decryptValue(input: EncryptedValue, aad: string): Buffer;
+  getSecret(name: string): Promise<string>;
   setSecret(name: string, plaintext: string): Promise<void>;
   insertSigningKey(input: SigningKeyInput): Promise<void>;
   getCurrentSigningKey(): Promise<{
@@ -50,6 +51,12 @@ interface PublishableSigningKeyRow {
   status: "current" | "retired";
 }
 
+interface SecretRow {
+  ciphertext: Uint8Array;
+  iv: Uint8Array;
+  auth_tag: Uint8Array;
+}
+
 export function createSecretsStore(database: PGlite, dbEncryptionKeyHex: string): SecretsStore {
   if (!/^[0-9a-f]{64}$/.test(dbEncryptionKeyHex)) {
     throw new Error("DB_ENCRYPTION_KEY must be exactly 64 lowercase hexadecimal characters.");
@@ -69,6 +76,24 @@ export function createSecretsStore(database: PGlite, dbEncryptionKeyHex: string)
     decipher.setAAD(Buffer.from(aad, "utf8"));
     decipher.setAuthTag(input.authTag);
     return Buffer.concat([decipher.update(input.ciphertext), decipher.final()]);
+  }
+
+  async function getSecret(name: string): Promise<string> {
+    const result = await database.query<SecretRow>(
+      `SELECT ciphertext, iv, auth_tag FROM secrets WHERE name = $1`,
+      [name],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`No secret named ${name} exists.`);
+
+    return decryptValue(
+      {
+        ciphertext: Buffer.from(row.ciphertext),
+        iv: Buffer.from(row.iv),
+        authTag: Buffer.from(row.auth_tag),
+      },
+      name,
+    ).toString("utf8");
   }
 
   async function setSecret(name: string, plaintext: string): Promise<void> {
@@ -159,6 +184,7 @@ export function createSecretsStore(database: PGlite, dbEncryptionKeyHex: string)
   return {
     encryptValue,
     decryptValue,
+    getSecret,
     setSecret,
     insertSigningKey,
     getCurrentSigningKey,

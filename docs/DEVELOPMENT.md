@@ -42,6 +42,22 @@ The health check is available at `GET /health`. Public signing keys are
 available at `GET /.well-known/jwks.json`; this response includes current and
 retired keys, excludes revoked keys, and uses `Cache-Control: no-store`.
 
+The OIDC login flow (CONTRACT-001) is implemented at `GET /auth/login`
+(redirects to Entra with a freshly generated, single-use `state`/`nonce`/PKCE
+`code_verifier`, held in an in-memory, 10-minute-TTL handshake store) and
+`GET /auth/callback` (Entra's registered redirect URI; exchanges the
+authorization code, validates the ID token against Entra's own cached
+discovery document and JWKS, and on success mints and sets the `bt_session`
+cookie via `src/tokens.ts`). Entra's discovery document is fetched lazily on
+first use and cached in memory (a transient refetch failure falls back to the
+last-known-good document rather than failing a login); Entra's JWKS is cached
+by `jose`'s own remote-JWKS-set logic. `CLIENT_SECRET` is read via
+`SecretsStore.getSecret("CLIENT_SECRET")` at each callback, never from `.env`.
+Failure responses follow CONTRACT-001's fixed status-code tiers (502 for an
+unreachable Entra, 400 for an invalid/expired handshake or a rejected/invalid
+token exchange, 500 for a missing identity claim or other unexpected error)
+and are always plain HTML with a generic, non-technical message.
+
 After configuring `.env` and building, bootstrap a fresh database with the
 normative command `node scripts/seed.js`. The launcher starts the compiled
 implementation with Node's `--env-file=.env` support. It prompts for

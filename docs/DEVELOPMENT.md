@@ -101,10 +101,10 @@ When `LOCAL_LOGIN=false`, `TENANT_ID`/`CLIENT_ID` are required exactly as
 before.
 
 `POST /auth/local-login` accepts `{"username": string, "password": string}`
-and authenticates against the `local_users` table (there is no seed-script
-or admin-API path yet to populate it — TASK-016/TASK-017 — so a row must
-currently be inserted directly, hashed via `src/password.ts`'s
-`hashPassword`, to exercise this endpoint). Passwords are hashed with
+and authenticates against the `local_users` table, populated either by
+`scripts/seed.js`'s first-user bootstrap step (below) or by the admin API's
+`POST /admin/users` (see "Local user admin API" below). Passwords are hashed
+with
 Node's built-in `crypto.scrypt` (`N=131072`, `r=8`, `p=1`, 64-byte derived
 key, a fresh 16-byte salt per password, `maxmem` explicitly set to 256 MiB
 on every call — the default 32 MiB `maxmem` is too small for these
@@ -204,6 +204,42 @@ key. For non-interactive setup, use
 file is deleted immediately after it is read and before the database is opened.
 Never pass the secret itself on the command line. `npm run seed` is a convenience
 alias that builds first and then runs the same entry point.
+
+Alongside `CLIENT_SECRET`/the signing key, `scripts/seed.js` also provisions
+the first `local_users` row (CONTRACT-005 §5, TASK-017), extending the same
+idempotent "what needs seeding" check with one more piece: on every
+invocation it also checks whether any row exists in `local_users`. If one or
+more rows already exist, this piece is reported as already seeded
+(`local_users already seeded; skipping.`) and no row is added, changed, or
+removed. If zero rows exist, it prompts for a username, an email, and a
+password using the same class of input handling as `CLIENT_SECRET`: username
+and email are prompted visibly (echoed) so an operator can see and correct
+typos, and the password prompt is hidden (not echoed), matching
+`CLIENT_SECRET`'s own hidden prompt. For non-interactive setup, use
+`node scripts/seed.js --local-user-file=<path>`; the file must contain
+exactly three lines, in order — username, then email, then password — with an
+optional single trailing newline. Exactly like `--client-secret-file`, this
+file is read once and deleted immediately afterward (before the database is
+even opened), and if the delete fails the whole run aborts with nothing
+written to PGlite and an instruction to delete the file manually, rather than
+proceeding with a leftover plaintext file on disk. Username/email/password
+are validated against the same format rules `POST /admin/users` applies
+(username: normalized lowercase, 3-64 characters,
+`[a-z0-9._-]`; password: at least 12 characters); an invalid file or
+interactive value aborts the run with a clear error naming the problem
+without revealing the invalid value itself. The password is hashed via the
+same `src/password.ts` `hashPassword` function (and the same scrypt
+parameters) the admin API and the local-login path use — not a separate or
+simplified routine — and the resulting row is inserted with
+`is_active = true`, zeroed lockout state (`failed_login_attempts = 0`,
+`locked_until = NULL`), and `created_by = 'seed-script'`. This step runs
+regardless of `LOCAL_LOGIN`'s value: pre-staging a local user is harmless in
+a deployment currently running Entra-only, since `/auth/local-login` never
+consults `local_users` while `LOCAL_LOGIN=false`. As with `CLIENT_SECRET`/the
+signing key, the seed script only ever provisions the *first* local user;
+creating additional users, or updating/deleting any of them (including the
+one the seed script created), goes through the admin API
+(`POST`/`PATCH`/`DELETE /admin/users*`) described above.
 
 The emergency key-rotation trigger (CONTRACT-003, "kill switch") is
 implemented at `POST /admin/emergency-rotate-keys`. It authenticates via a

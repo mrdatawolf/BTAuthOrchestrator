@@ -1,8 +1,8 @@
 # CONTRACT-003: Emergency key-rotation authorization
 
-Status: Proposed — pending human approval
-Approved by:
-Approved date:
+Status: Approved
+Approved by: Patrick
+Approved date: 2026-09-14
 Related tasks: TASK-009 (consumes this contract; Plan step 1 requests exactly
 this design), CONTRACT-002 (storage/rotation interface this contract builds
 on — `rotateSigningKey`), CONTRACT-001 (defines the `bt_session` cookie this

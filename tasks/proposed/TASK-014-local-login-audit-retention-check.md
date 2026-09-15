@@ -3,9 +3,9 @@
 Owner role: Implementer
 Assigned agent: TBD
 Proposed by: Patrick Moon
-Proposed date: 2026-09-15
-Approved by:
-Approved date:
+Proposed date: 
+Approved by: 
+Approved date: 2026-09-15
 Related contracts: CONTRACT-005 (local login and user management —
 `local_login_audit` is this contract's table; CONTRACT-005 explicitly defers
 a retention policy to this task rather than designing one speculatively)

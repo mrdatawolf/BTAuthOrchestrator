@@ -5,8 +5,8 @@ Assigned agent: TBD
 Proposed by: Claude (direct request from Patrick to break CONTRACT-005 into
 small tasks)
 Proposed date: 2026-09-15
-Approved by:
-Approved date:
+Approved by: Patrick
+Approved date: 2026-09-15
 Related contracts: CONTRACT-005 (§4, §6's admin-audit half)
 Related ADRs: ADR-003
 Dependencies: TASK-015 (needs `local_users` schema and the password-hashing

@@ -74,11 +74,35 @@ None.
 
 ## Implementation handoff
 
-Not started.
+Not applicable — TASK-011's Owner role is Reviewer; this task has no
+implementer/implementation of its own. The work of this task *is* the
+independent review recorded below.
 
 ## Review
 
-Not reviewed.
+Outcome: **Human decision required**. Full review document:
+`docs/reviews/TASK-011-milestone-1-2-review.md`.
+
+Every item in Scope > Included was directly, hands-on verified against the
+real compiled service (live sockets where this sandbox permitted them,
+including a from-scratch mock-Entra harness, direct PGlite row inspection,
+tamper/wrong-key decryption tests, concurrent-process and concurrent-rotation
+tests, and a live re-run of TASK-010's own `verify-offline` proof) rather
+than only read from implementer handoffs, and all passed: PKCE/state/nonce
+correctness including tampering and replay, cookie/secret handling and
+`NODE_ENV` independence, private-key isolation, envelope-encryption
+correctness, data-directory permissions, the single-process constraint,
+CONTRACT-003's emergency-rotation trigger (including atomicity, concurrency,
+and audit trail), and the Entra-unreachable 502 path. One finding needs
+Patrick's decision rather than being a plain defect: CONTRACT-002 specifies a
+`rotateSigningKey`/`revokeKey` interface that TASK-009 did not implement,
+substituting a different function to solve an atomicity problem CONTRACT-003
+itself had explicitly flagged as an open question for Patrick to resolve
+before implementation — functionally correct and transparently documented,
+but not escalated first. A second, already-tracked, non-blocking item
+(TASK-003d's TLS provisioning still pending) is restated for visibility.
+See the full report for every finding, its severity, and the evidence behind
+it.
 
 ## Human acceptance
 

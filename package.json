@@ -9,7 +9,8 @@
     "dev": "npm run build && npm start",
     "build": "tsc",
     "seed": "npm run build && node scripts/seed.js",
-    "start": "node --env-file=.env dist/index.js"
+    "start": "node --env-file=.env dist/index.js",
+    "verify-offline": "npm run build && node scripts/verify-offline.js"
   },
   "devDependencies": {
     "@types/node": "20.19.27",

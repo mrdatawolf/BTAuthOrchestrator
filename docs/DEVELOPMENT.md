@@ -41,6 +41,7 @@ npm run dev
 npm run build
 npm run seed
 npm start
+npm run verify-offline
 ```
 
 `npm run dev` builds/type-checks and starts the service. `npm run build` compiles
@@ -103,6 +104,32 @@ value never causes the request to fail. Concurrent trigger requests are not
 rejected or deduplicated; each independently rotates, and PGlite's
 transactional guarantee (exactly one `current` row) serializes them into
 consecutive rotations, which is the intended outcome, not an error.
+
+`node scripts/verify-offline.js` (alias: `npm run verify-offline`, which builds
+first) is TASK-010's standalone, re-runnable offline-verification proof
+against the real compiled service and a real, already-seeded
+`PGLITE_DATA_DIR`. It mints a session token directly via `mintSessionToken`
+against the current signing key (no interactive Entra login is needed or
+used), fetches `/.well-known/jwks.json` once, and verifies the token
+completely offline using `jose`'s `createLocalJWKSet` (a global-`fetch`
+instrumentation confirms zero network calls happen during the `jwtVerify`
+call itself). It then triggers `POST /admin/emergency-rotate-keys`, re-fetches
+JWKS, and confirms the same token now fails offline verification because its
+`kid` is absent from the fresh JWKS response. Because CONTRACT-002 enforces a
+strict single-process lock on `PGLITE_DATA_DIR`, this script reads the
+current signing key directly from the database first (releasing the lock
+immediately afterward) and only then launches the real compiled service
+(`dist/index.js`) itself as a child process against the same `.env`, so the
+whole proof remains a single self-contained command rather than requiring the
+operator to separately start the service first. If a separate instance of
+the service is already running against the same `PGLITE_DATA_DIR`, this
+script fails fast with a clear "already locked" error rather than hanging or
+corrupting state; stop the other instance first. If the sandbox/host does not
+permit live socket binding, the script automatically falls back to invoking
+the exported `createRequestHandler` function directly (no real HTTP socket,
+no child process) and says so plainly in its output, matching TASK-008/012's
+validation precedent. The script prints one clear PASS/FAIL line per
+acceptance criterion and exits non-zero if any fail.
 
 On startup, the service creates `PGLITE_DATA_DIR` with mode `0700` when it is
 absent, verifies an existing directory is mode `0700` and owned by the running

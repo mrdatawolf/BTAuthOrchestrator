@@ -44,6 +44,41 @@ CREATE TABLE IF NOT EXISTS emergency_rotation_audit (
   new_kid text,
   failure_reason text
 );
+
+-- CONTRACT-005 §1. password_algorithm/password_cost_n/password_block_size_r/
+-- password_parallelization_p/password_key_length are stored per-row (not
+-- DB-constrained, application-validated) so a future hashing-parameter or
+-- algorithm change never invalidates existing rows.
+CREATE TABLE IF NOT EXISTS local_users (
+  id text PRIMARY KEY,
+  username text UNIQUE NOT NULL,
+  email text UNIQUE NOT NULL,
+  password_hash bytea NOT NULL,
+  password_salt bytea NOT NULL,
+  password_algorithm text NOT NULL DEFAULT 'scrypt',
+  password_cost_n integer NOT NULL,
+  password_block_size_r integer NOT NULL,
+  password_parallelization_p integer NOT NULL,
+  password_key_length integer NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  failed_login_attempts integer NOT NULL DEFAULT 0,
+  locked_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  created_by text
+);
+
+-- CONTRACT-005 §1/§6. One row per /auth/local-login attempt, success or
+-- failure. failure_reason is intentionally more granular than the HTTP
+-- response the caller ever sees (§2's enumeration-resistance scheme).
+CREATE TABLE IF NOT EXISTS local_login_audit (
+  id text PRIMARY KEY,
+  attempted_at timestamptz NOT NULL DEFAULT now(),
+  username text NOT NULL,
+  result text NOT NULL CHECK (result IN ('success', 'failure')),
+  failure_reason text,
+  source_ip text
+);
 `;
 
 export interface DatabaseHandle {

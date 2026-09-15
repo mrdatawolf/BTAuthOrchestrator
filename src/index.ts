@@ -6,6 +6,8 @@ import { exportJWK, importSPKI } from "jose";
 
 import { loadConfig, type Config } from "./config.js";
 import { openDatabase, prepareDataDirectory, type DatabaseHandle } from "./database.js";
+import { createIpThrottle, type IpThrottle } from "./ipThrottle.js";
+import { createLocalUserStore, type LocalUserStore } from "./localUsers.js";
 import {
   computeCodeChallenge,
   createHandshakeStore,
@@ -20,6 +22,7 @@ import {
   validateIdToken,
   type EntraDiscoveryDocument,
 } from "./oidc.js";
+import { deriveDummyHashForTimingParity, verifyPassword } from "./password.js";
 import { createSecretsStore, type SecretsStore } from "./secrets.js";
 import { mintSessionToken, nextLocalMidnightEpochSeconds } from "./tokens.js";
 
@@ -48,6 +51,26 @@ const EMERGENCY_ROTATION_RESPONSE_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
 };
 
+// CONTRACT-005: same defensive-cap posture as
+// EMERGENCY_ROTATION_BODY_LIMIT_BYTES above (not specified by the contract;
+// a narrow implementation judgment call, see the handoff's "Assumptions and
+// deviations"). Unlike the emergency-rotation body (fully optional), the
+// local-login body carries the required username/password, so exceeding
+// this cap is treated as the same 400 "malformed request" outcome as any
+// other missing/invalid body, never a 500.
+const LOCAL_LOGIN_BODY_LIMIT_BYTES = 16_384;
+
+const LOCAL_LOGIN_MISSING_FIELDS_MESSAGE = "username and password are required";
+const LOCAL_LOGIN_INVALID_CREDENTIALS_MESSAGE = "Invalid username or password.";
+const LOCAL_LOGIN_DISABLED_MESSAGE = "This account has been disabled.";
+const LOCAL_LOGIN_TOO_MANY_ATTEMPTS_MESSAGE = "Too many sign-in attempts. Try again later.";
+const LOCAL_LOGIN_GENERIC_SERVER_ERROR_MESSAGE =
+  "Something went wrong signing you in; this has been logged.";
+
+const LOCAL_LOGIN_RESPONSE_HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+};
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -70,13 +93,13 @@ function constantTimeTokenMatches(candidate: string, expected: string): boolean 
   return timingSafeEqual(candidateBuffer, expectedBuffer);
 }
 
-async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+async function readRequestBody(request: IncomingMessage, limitBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const bufferChunk: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     size += bufferChunk.length;
-    if (size > EMERGENCY_ROTATION_BODY_LIMIT_BYTES) {
+    if (size > limitBytes) {
       throw new Error("Request body exceeds the maximum accepted size.");
     }
     chunks.push(bufferChunk);
@@ -141,9 +164,17 @@ function buildSetCookieHeader(token: string, iat: number, exp: number, secure: b
   return attributes.join("; ");
 }
 
-export function createRequestHandler(secretsStore: SecretsStore, config: Config): RequestListener {
+export function createRequestHandler(
+  secretsStore: SecretsStore,
+  config: Config,
+  localUserStore: LocalUserStore,
+): RequestListener {
   const handshakeStore = createHandshakeStore();
   const discoveryCache = new EntraDiscoveryCache();
+  const ipThrottle: IpThrottle = createIpThrottle(
+    config.localLoginIpThrottleMaxAttempts,
+    config.localLoginIpThrottleWindowMinutes * 60_000,
+  );
 
   async function handleLogin(): Promise<{ status: number; headers: Record<string, string>; body: string }> {
     let discovery: EntraDiscoveryDocument;
@@ -318,7 +349,7 @@ export function createRequestHandler(secretsStore: SecretsStore, config: Config)
 
     let bodyText = "";
     try {
-      bodyText = (await readRequestBody(request)).toString("utf8");
+      bodyText = (await readRequestBody(request, EMERGENCY_ROTATION_BODY_LIMIT_BYTES)).toString("utf8");
     } catch (error) {
       // An oversized/unreadable body is not an authorization decision; it
       // just means triggeredBy is unavailable for this attempt.
@@ -369,15 +400,249 @@ export function createRequestHandler(secretsStore: SecretsStore, config: Config)
     }
   }
 
+  // CONTRACT-005 §2: parses and validates the request body, returning the
+  // normalized username/password pair, or null if the body is missing,
+  // malformed, oversized, or missing either required non-empty string field
+  // — all of which map to the same 400 response, before any user lookup or
+  // hashing occurs.
+  async function parseLocalLoginRequestBody(
+    request: IncomingMessage,
+  ): Promise<{ normalizedUsername: string; password: string } | null> {
+    let bodyText: string;
+    try {
+      bodyText = (await readRequestBody(request, LOCAL_LOGIN_BODY_LIMIT_BYTES)).toString("utf8");
+    } catch {
+      return null;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      return null;
+    }
+
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { username, password } = parsed as Record<string, unknown>;
+    if (typeof username !== "string" || username.trim() === "") return null;
+    if (typeof password !== "string" || password === "") return null;
+
+    return { normalizedUsername: username.trim().toLowerCase(), password };
+  }
+
+  async function writeLocalLoginAuditBestEffort(input: {
+    username: string;
+    result: "success" | "failure";
+    failureReason: "unknown_username" | "bad_password" | "disabled" | "locked" | null;
+    sourceIp: string | null;
+  }): Promise<void> {
+    try {
+      await localUserStore.writeLoginAudit(input);
+    } catch (error) {
+      // CONTRACT-005 §6: never block the caller's response on this write;
+      // fall back to a server-side log-line backstop naming only a
+      // timestamp and result/failure category — never a credential value.
+      console.error(
+        `local_login_audit write failed; log-line backstop: timestamp=${new Date().toISOString()} result=${input.result} failureReason=${input.failureReason ?? "null"}: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  async function handleLocalLogin(
+    request: IncomingMessage,
+  ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+    const sourceIp = extractSourceIp(request);
+    // CONTRACT-005 §3: a request with no determinable source IP is bucketed
+    // under a fixed key so it still receives coarse throttling rather than
+    // bypassing it entirely — not expected in normal operation (the socket
+    // peer address is always available server-side), flagged as an
+    // implementer judgment call in the handoff.
+    const throttleKey = sourceIp ?? "unknown";
+    const now = Date.now();
+
+    // CONTRACT-005 §2 step 1: checked first, before any body parsing, user
+    // lookup, or hashing.
+    if (ipThrottle.isThrottled(throttleKey, now)) {
+      return {
+        status: 429,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_TOO_MANY_ATTEMPTS_MESSAGE }),
+      };
+    }
+
+    const parsedBody = await parseLocalLoginRequestBody(request);
+    if (parsedBody === null) {
+      // CONTRACT-005 §2: malformed request — before any user lookup or
+      // hashing occurs, and (per §6) not itself an audited login attempt.
+      return {
+        status: 400,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_MISSING_FIELDS_MESSAGE }),
+      };
+    }
+    const { normalizedUsername, password } = parsedBody;
+
+    // CONTRACT-005 §8: every failure path renders a plain JSON error body,
+    // never a raw/unhandled exception. This try/catch covers every step
+    // between body validation and the success/failure outcome being decided
+    // (lookup, the uniform-cost password derivation, and the per-account/
+    // audit/throttle side effects), so an unexpected failure at any of those
+    // steps (e.g. a database error, or the defensive password_algorithm
+    // guard in src/password.ts) still surfaces as the same generic 500
+    // rather than an unhandled rejection.
+    let userRow: Awaited<ReturnType<LocalUserStore["findByUsername"]>>;
+    let failureReason: "unknown_username" | "bad_password" | "disabled" | "locked" | null;
+    let isSuccess: boolean;
+    try {
+      userRow = await localUserStore.findByUsername(normalizedUsername);
+
+      // CONTRACT-005 §2 step 3: this uniform-cost password-derivation
+      // computation runs to completion for every outcome (unknown username,
+      // locked, disabled, bad password) before the outcome is decided
+      // below, so response timing cannot distinguish them.
+      let passwordMatches = false;
+      if (userRow === undefined) {
+        await deriveDummyHashForTimingParity();
+      } else {
+        passwordMatches = await verifyPassword(password, {
+          hash: userRow.passwordHash,
+          salt: userRow.passwordSalt,
+          algorithm: userRow.passwordAlgorithm,
+          costN: userRow.passwordCostN,
+          blockSizeR: userRow.passwordBlockSizeR,
+          parallelizationP: userRow.passwordParallelizationP,
+          keyLength: userRow.passwordKeyLength,
+        });
+      }
+
+      // CONTRACT-005 §2 step 4: outcome precedence — not found, then locked
+      // (regardless of password match), then disabled (regardless of
+      // password match), then bad password, then success.
+      failureReason = null;
+      if (userRow === undefined) {
+        failureReason = "unknown_username";
+      } else {
+        const isLockedNow = userRow.lockedUntil !== null && userRow.lockedUntil.getTime() > now;
+        if (isLockedNow) {
+          failureReason = "locked";
+        } else if (!userRow.isActive) {
+          failureReason = "disabled";
+        } else if (!passwordMatches) {
+          failureReason = "bad_password";
+        }
+      }
+      isSuccess = failureReason === null;
+
+      // Per-account side effects (§2 step 4 / §3). Locked and disabled
+      // outcomes leave failed_login_attempts/locked_until untouched — an
+      // attempt made while already locked never further extends the
+      // lockout.
+      if (userRow !== undefined) {
+        if (isSuccess) {
+          await localUserStore.recordSuccessfulLogin(userRow.id);
+        } else if (failureReason === "bad_password") {
+          await localUserStore.recordFailedPassword(
+            userRow.id,
+            config.localLoginMaxFailedAttempts,
+            config.localLoginLockoutMinutes,
+          );
+        }
+      }
+
+      // §6: one audit row per attempt, best-effort.
+      await writeLocalLoginAuditBestEffort({
+        username: normalizedUsername,
+        result: isSuccess ? "success" : "failure",
+        failureReason,
+        sourceIp,
+      });
+
+      // §3: only failed attempts count toward the per-IP throttle; a
+      // success does not reset or otherwise affect any IP's failure count.
+      if (!isSuccess) {
+        ipThrottle.recordFailure(throttleKey, now);
+      }
+    } catch (error) {
+      console.error(`Local-login credential verification failed unexpectedly: ${errorMessage(error)}`);
+      return {
+        status: 500,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_GENERIC_SERVER_ERROR_MESSAGE }),
+      };
+    }
+
+    if (failureReason === "unknown_username" || failureReason === "bad_password") {
+      return {
+        status: 401,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_INVALID_CREDENTIALS_MESSAGE }),
+      };
+    }
+    if (failureReason === "disabled") {
+      return {
+        status: 403,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_DISABLED_MESSAGE }),
+      };
+    }
+    if (failureReason === "locked") {
+      // userRow is defined whenever failureReason === "locked".
+      const lockedUntilIso = userRow!.lockedUntil!.toISOString();
+      return {
+        status: 423,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({
+          error: `This account is temporarily locked. Try again after ${lockedUntilIso}.`,
+        }),
+      };
+    }
+
+    // Success: mint and set bt_session exactly as CONTRACT-001's callback
+    // handler does (CONTRACT-005 §9) — same mintSessionToken call, same
+    // cookie-construction logic, no reimplementation.
+    try {
+      const signingKey = await secretsStore.getCurrentSigningKey();
+      const mintedAt = new Date();
+      const token = await mintSessionToken(
+        { sub: userRow!.id, email: userRow!.email, upn: userRow!.username },
+        signingKey,
+        config.issuer,
+        mintedAt,
+      );
+      const iat = Math.floor(mintedAt.getTime() / 1_000);
+      const exp = nextLocalMidnightEpochSeconds(mintedAt);
+      const cookieSecure = config.cookieSecure.trim().toLowerCase() === "true";
+      return {
+        status: 200,
+        headers: {
+          ...LOCAL_LOGIN_RESPONSE_HEADERS,
+          "Set-Cookie": buildSetCookieHeader(token, iat, exp, cookieSecure),
+        },
+        body: JSON.stringify({ status: "signed_in", username: userRow!.username }),
+      };
+    } catch (error) {
+      console.error(`Local-login session token minting failed: ${errorMessage(error)}`);
+      return {
+        status: 500,
+        headers: LOCAL_LOGIN_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: LOCAL_LOGIN_GENERIC_SERVER_ERROR_MESSAGE }),
+      };
+    }
+  }
+
   return async (request, response) => {
-    if (request.method === "GET" && request.url === "/auth/login") {
+    if (config.localLogin === false && request.method === "GET" && request.url === "/auth/login") {
       const result = await handleLogin();
       response.writeHead(result.status, result.headers);
       response.end(result.body);
       return;
     }
 
-    if (request.method === "GET" && (request.url ?? "").split("?")[0] === "/auth/callback") {
+    if (
+      config.localLogin === false &&
+      request.method === "GET" &&
+      (request.url ?? "").split("?")[0] === "/auth/callback"
+    ) {
       const url = new URL(request.url ?? "/auth/callback", "http://localhost");
       const result = await handleCallback(url);
       response.writeHead(result.status, result.headers);
@@ -434,6 +699,18 @@ export function createRequestHandler(secretsStore: SecretsStore, config: Config)
       return;
     }
 
+    // CONTRACT-005 §7: strict either/or with GET /auth/login and GET
+    // /auth/callback above — live only when LOCAL_LOGIN=true, otherwise
+    // falls through to the same generic 404 below as any unmatched route.
+    // Note: GET /auth/local-login (the HTML form, §11) is deliberately not
+    // implemented here — TASK-018's scope, not this task's.
+    if (config.localLogin === true && request.method === "POST" && (request.url ?? "").split("?")[0] === "/auth/local-login") {
+      const result = await handleLocalLogin(request);
+      response.writeHead(result.status, result.headers);
+      response.end(result.body);
+      return;
+    }
+
     response.writeHead(404, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: "Not found" }));
   };
@@ -446,7 +723,8 @@ async function start(): Promise<void> {
     await prepareDataDirectory(config.pgliteDataDir);
     databaseHandle = await openDatabase(config.pgliteDataDir);
     const secretsStore = createSecretsStore(databaseHandle.database, config.dbEncryptionKey);
-    const server = createServer(createRequestHandler(secretsStore, config));
+    const localUserStore = createLocalUserStore(databaseHandle.database);
+    const server = createServer(createRequestHandler(secretsStore, config, localUserStore));
 
     server.listen(config.port, () => {
       console.log(`BTAuthOrchestrator listening on port ${config.port}`);

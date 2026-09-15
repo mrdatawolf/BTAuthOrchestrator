@@ -11,7 +11,9 @@
 ## Repository layout
 
 - `src/`: service source code, including bootstrap configuration and the HTTP
-  entry point.
+  entry point. `src/password.ts` holds scrypt password hashing/verification
+  and `src/localUsers.ts`/`src/ipThrottle.ts` hold the local-login user store
+  and per-source-IP throttle (CONTRACT-005).
 - `scripts/seed.js`: stable bootstrap entry point that loads the compiled seed
   implementation from `dist/seed.js`.
 - `dist/`: compiled JavaScript output created by the build (not committed).
@@ -21,8 +23,13 @@
 ## Setup and commands
 
 Copy `.env.example` to `.env` and replace its example values as appropriate.
-All eight listed variables must be non-empty, and `PORT` must be an integer from
-1 through 65535.
+`PORT`, `PGLITE_DATA_DIR`, `DB_ENCRYPTION_KEY`, `COOKIE_SECURE`,
+`SERVICE_ISSUER`, `EMERGENCY_ROTATION_TOKEN`, `LOCAL_LOGIN`, and
+`LOCAL_USER_ADMIN_TOKEN` are always required and must be non-empty; `PORT`
+must be an integer from 1 through 65535. `TENANT_ID` and `CLIENT_ID` are
+required only when `LOCAL_LOGIN=false` (see "Local username/password login"
+below); four further brute-force-protection variables are optional with
+sane defaults (same section).
 
 `SERVICE_ISSUER` sets the session-token `iss` claim. Production must use
 `https://orca.biztechro.com`; non-production deployments may use their own
@@ -34,6 +41,13 @@ characters and is unrelated to any Entra identity, `bt_session` cookie, or
 `CLIENT_SECRET`; generate it with, e.g., `openssl rand -hex 32`. The service
 fails closed at startup if it is missing or shorter than 32 characters, the
 same posture as `DB_ENCRYPTION_KEY`.
+
+`LOCAL_USER_ADMIN_TOKEN` is the dedicated bearer credential reserved for the
+future local-user admin API (`/admin/users*`, CONTRACT-005 §4, TASK-016).
+Same format/length rule as `EMERGENCY_ROTATION_TOKEN` (at least 32
+characters, fails closed at startup otherwise) and deliberately a separate
+value from it on least-privilege grounds — this task (TASK-015) only adds
+its config validation; the admin API itself does not exist yet.
 
 ```sh
 npm install
@@ -65,6 +79,69 @@ Failure responses follow CONTRACT-001's fixed status-code tiers (502 for an
 unreachable Entra, 400 for an invalid/expired handshake or a rejected/invalid
 token exchange, 500 for a missing identity claim or other unexpected error)
 and are always plain HTML with a generic, non-technical message.
+
+### Local username/password login (CONTRACT-005)
+
+`LOCAL_LOGIN` is a strict, whole-service mode switch (`"true"`/`"false"`,
+case-insensitive, no implicit default): exactly one of the two login paths
+is ever live. `LOCAL_LOGIN=true` makes `POST /auth/local-login` live and
+makes `GET /auth/login`/`GET /auth/callback` fall through to the same
+generic `404` used by any unmatched route (no discovery fetch, no handshake
+entry, no token exchange executes). `LOCAL_LOGIN=false` is the reverse:
+`POST /auth/local-login` is the one that 404s, and Entra's routes behave
+exactly as CONTRACT-001 already specifies. `GET /.well-known/jwks.json` and
+`POST /admin/emergency-rotate-keys` are unaffected by this flag in either
+state. `GET /auth/local-login` (a minimal HTML login form) is **not**
+implemented by this task — it remains a generic `404` regardless of
+`LOCAL_LOGIN`'s value until TASK-018 adds it, and the admin CRUD API
+(`/admin/users*`) likewise does not exist yet (TASK-016) — any request to it
+currently 404s too, from either mode.
+
+When `LOCAL_LOGIN=true`, `TENANT_ID`/`CLIENT_ID` are not required and may be
+absent from `.env` entirely; when present anyway they are simply unused.
+When `LOCAL_LOGIN=false`, `TENANT_ID`/`CLIENT_ID` are required exactly as
+before.
+
+`POST /auth/local-login` accepts `{"username": string, "password": string}`
+and authenticates against the `local_users` table (there is no seed-script
+or admin-API path yet to populate it — TASK-016/TASK-017 — so a row must
+currently be inserted directly, hashed via `src/password.ts`'s
+`hashPassword`, to exercise this endpoint). Passwords are hashed with
+Node's built-in `crypto.scrypt` (`N=131072`, `r=8`, `p=1`, 64-byte derived
+key, a fresh 16-byte salt per password, `maxmem` explicitly set to 256 MiB
+on every call — the default 32 MiB `maxmem` is too small for these
+parameters and throws `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` otherwise).
+Verification always performs a same-cost scrypt derivation — against a
+fixed dummy salt/password when the username doesn't match any row — before
+deciding the outcome, so response timing cannot distinguish an unknown
+username from a known username with the wrong password. The response is a
+two-tier scheme: unknown username and wrong password both produce an
+identical `401 {"error":"Invalid username or password."}`; a disabled
+account produces its own `403`; a locked account produces its own `423`
+naming the exact unlock time. On success, the response is
+`200 {"status":"signed_in","username":"<username>"}` plus a `Set-Cookie`
+header — the `bt_session` cookie is minted via the same `mintSessionToken`
+(`src/tokens.ts`) and cookie-construction logic CONTRACT-001's callback uses,
+not a reimplementation.
+
+Brute-force protection has two layers, both configurable via optional
+`.env` variables (each validated as a positive integer if present; silently
+defaulted if absent — the one exception in this project to the
+required-with-no-implicit-default posture):
+`LOCAL_LOGIN_MAX_FAILED_ATTEMPTS` (default `10`) consecutive wrong-password
+attempts locks a `local_users` account for `LOCAL_LOGIN_LOCKOUT_MINUTES`
+(default `15`) minutes (`locked_until`); attempts made while already locked
+do not extend the lockout, and a correct password after it passes clears
+both `failed_login_attempts` and `locked_until`. Separately,
+`LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS` (default `20`) failed attempts from
+one source IP (across any usernames) within a rolling
+`LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` (default `5`) minute window produce
+`429` on further attempts from that IP until the window rolls forward; this
+in-memory counter (`src/ipThrottle.ts`) resets on process restart, the same
+accepted tradeoff as the OIDC handshake store. Every `/auth/local-login`
+attempt (success or failure) writes one row to `local_login_audit`,
+best-effort — a malformed request (missing/invalid body) is rejected `400`
+before any lookup, hashing, or audit write occurs.
 
 After configuring `.env` and building, bootstrap a fresh database with the
 normative command `node scripts/seed.js`. The launcher starts the compiled

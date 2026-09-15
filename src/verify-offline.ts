@@ -35,6 +35,7 @@ import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 
 import { loadConfig, type Config } from "./config.js";
 import { openDatabase, prepareDataDirectory } from "./database.js";
+import { createLocalUserStore } from "./localUsers.js";
 import { createSecretsStore } from "./secrets.js";
 import { createRequestHandler } from "./index.js";
 import { mintSessionToken, type TokenSigningKey } from "./tokens.js";
@@ -257,7 +258,8 @@ async function runFallbackMode(config: Config): Promise<AcceptanceResult[]> {
     const token = await mintSessionToken(VERIFY_CLAIMS, signingKey, config.issuer, new Date());
     console.log(`Minted a session token via mintSessionToken() directly (no interactive Entra login), kid=${signingKey.kid}.`);
 
-    const handler = createRequestHandler(store, config);
+    const localUserStore = createLocalUserStore(handle.database);
+    const handler = createRequestHandler(store, config, localUserStore);
 
     const fetchJwks = async (): Promise<JwksResponseBody> => {
       const request = createFakeRequest("GET", "/.well-known/jwks.json", {});

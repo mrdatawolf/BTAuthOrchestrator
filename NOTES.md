@@ -123,13 +123,13 @@ itself is a single point of failure — tenant outage, a misconfigured app
 registration, a network egress problem, anything. CDMS already has this
 (`.env`-configured `FALLBACK_ADMIN_USERNAME`/`PASSWORD`, always works even if
 the primary auth path or DB is down) and it's explicitly meant to survive
-this migration, not be deleted once Entra is wired up. Open question: does
-BTAuthOrchestrator own a single, central break-glass path for all apps, or
-does each app keep its own local one? Leaning toward "each app keeps its
-own" for the same reason verification stays local — a central break-glass
-mechanism is itself a single point of failure for the exact outage scenario
-it exists to cover. Worth a deliberate decision before the first
-non-CDMS integration, not before.
+this migration, not be deleted once Entra is wired up. **Decided
+(2026-09-15, see ADR-002): each app keeps its own break-glass path, built
+entirely internally as its own auth override.** BTAuthOrchestrator has no
+central break-glass path, no visibility into any app's break-glass design,
+and is never asked what an app's mechanism is — the same reason
+verification stays local: a central break-glass mechanism would itself be a
+single point of failure for the exact outage scenario it exists to cover.
 
 ## 5. What's resolved vs. still open
 
@@ -161,10 +161,13 @@ non-CDMS integration, not before.
   is a tenant-wide switch affecting all of O365, not scoped to this app —
   out of scope for this project; a separate IT security-posture decision if
   Patrick chooses to pursue it later.
+- Centralized vs. per-app break-glass admin (see §4): each app keeps its
+  own, built entirely internally. BTAuthOrchestrator has no central
+  break-glass path and no role in any app's. Decided 2026-09-15, see
+  ADR-002.
 
 **Open:**
-- Centralized vs. per-app break-glass admin (see §4) — needs a decision
-  before rolling out past CDMS.
+- None outstanding as of 2026-09-15.
 
 ## 6. Rough first milestone
 

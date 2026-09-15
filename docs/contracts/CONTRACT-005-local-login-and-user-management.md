@@ -3,7 +3,12 @@
 Status: Proposed
 Approved by:
 Approved date:
-Related tasks: None yet. This contract was commissioned directly by Patrick in
+Related tasks: None yet for a dedicated implementation task covering this
+contract as a whole. TASK-006 (CONTRACT-004's bootstrap/seed script) is
+referenced because Required behavior §5 extends its idempotent seeding
+pattern to also provision the first local user — this contract does not
+modify CONTRACT-004's own text, only adds a new seeding step to TASK-006's
+script alongside it. This contract was commissioned directly by Patrick in
 conversation (2026-09-15) rather than from an existing task file — he decided
 live that a permanent local-login path and an HTTP user-admin API are wanted,
 and asked for a contract to be drafted directly against that direction. Per
@@ -11,10 +16,9 @@ and asked for a contract to be drafted directly against that direction. Per
 file translating this contract into an implementation plan still needs to be
 filed and approved before any of this is built; this contract does not itself
 authorize implementation.
-Related ADRs: None govern this directly. See Open questions for whether this
-decision (a permanent local-login path alongside Entra, reversing part of
-NOTES.md §3's original reasoning) warrants its own ADR for the record, the
-way ADR-002 recorded the break-glass decision.
+Related ADRs: ADR-003 (records the architectural decision to add a
+permanent local-login path alongside Entra; this contract is its full
+behavioral specification).
 Supersedes:
 Superseded by:
 
@@ -47,8 +51,9 @@ This contract treats the following as settled, per direct instruction:
   CONTRACT-001 defines, via the same `mintSessionToken` function, so nothing
   downstream (JWKS, consuming-app verification) needs to know or care which
   path minted a given token.
-- User CRUD is exposed via an HTTP admin API, not a CLI-only tool (Patrick's
-  explicit choice over extending `scripts/seed.js`-style tooling).
+- User CRUD is exposed via an HTTP admin API, not a CLI-only tool, for every
+  operation except the very first local user's bootstrap provisioning,
+  which — per Patrick's later decision, §5 — does extend `scripts/seed.js`.
 - Real, non-stub password hashing is required.
 - User creation is admin/operator-driven; there is no self-service signup
   flow, consistent with NOTES.md §2's "no external/self-service user"
@@ -77,7 +82,10 @@ This contract treats the following as settled, per direct instruction:
 - Whether/how this entire capability can be disabled in a given deployment.
 - This contract's relationship to CONTRACT-001 (token minting/cookie reuse)
   and CONTRACT-004 (storage conventions, explicitly not reused for password
-  hashing — see "Interfaces").
+  hashing; and the `scripts/seed.js` bootstrap extension — see "Interfaces").
+- A minimal, unstyled HTML login form (`GET /auth/local-login`), a thin
+  client-side wrapper around the JSON `POST /auth/local-login` endpoint with
+  no server-side logic of its own — see Required behavior §11.
 
 ### Excluded
 
@@ -95,11 +103,10 @@ This contract treats the following as settled, per direct instruction:
   expiry, the same accepted bound CONTRACT-001/CONTRACT-003 already establish
   for the Entra path. Immediate global revocation remains CONTRACT-003's
   emergency-rotation "kill switch," unchanged and out of scope here.
-- Any browser-rendered login form or admin UI. This contract specifies a
-  JSON HTTP API only, consistent with NOTES.md's "no UI polish" posture and
-  CONTRACT-003's "no browser-facing admin UI" precedent — see Open questions
-  for whether a minimal HTML login form is separately wanted given real
-  people (not just automated tests) are expected to use this.
+- Any browser-rendered **admin** UI. The admin CRUD API remains JSON-only,
+  consistent with CONTRACT-003's "no browser-facing admin UI" precedent. (A
+  minimal HTML *login* form now exists — see Included above and Required
+  behavior §11 — but no equivalent is provided for user administration.)
 - Rotating `DB_ENCRYPTION_KEY` or any other concern already scoped to
   CONTRACT-004; this contract adds new tables alongside CONTRACT-004's but
   does not touch its envelope-encryption machinery (see Interfaces for why).
@@ -202,6 +209,14 @@ This contract treats the following as settled, per direct instruction:
 - `TENANT_ID` and `CLIENT_ID` are required, non-empty preconditions **only
   when `LOCAL_LOGIN=false`**; when `LOCAL_LOGIN=true` they are not
   preconditions at all and may be absent — see Required behavior §10.
+- `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS`, `LOCAL_LOGIN_LOCKOUT_MINUTES`,
+  `LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS`, and
+  `LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` are **optional** in `.env` — the
+  one deliberate exception in this contract to the project's usual
+  required-with-no-implicit-default posture. If present, each must parse as
+  a positive integer or the process fails closed at startup; if absent, the
+  defaults `10`, `15`, `20`, and `5` (respectively) apply silently — see
+  Required behavior §3.
 
 ## Required behavior
 
@@ -404,31 +419,52 @@ Human-chosen passwords are not high-entropy the way CONTRACT-003's
 bearer token's 32+ random characters make network brute force impractical
 and skipped rate-limiting on that basis). That reasoning does not transfer
 here, so this contract defines explicit protection rather than silently
-omitting it:
+omitting it.
 
-**Per-account lockout.** After `10` consecutive failed attempts against a
-given `username` (tracked via `local_users.failed_login_attempts`), the
-account is locked: `locked_until` is set to `now() + 15 minutes`. While
-`locked_until` is in the future, every attempt fails with `reason='locked'`
-(§2) regardless of the password supplied, and lockout state is **not**
-further modified by attempts made during the lockout window (so repeated
-retries during lockout cannot indefinitely extend it). Once `locked_until`
-has passed, attempts are evaluated normally again; a further wrong password
-immediately re-locks (extending `locked_until` again from that point), and a
-correct password succeeds and clears both fields. `10` attempts / `15`
-minutes are this contract's own judgment calls, not derived from any stated
-requirement — flagged in Open questions.
+**Confirmed by Patrick (2026-09-15): all four thresholds below are
+configurable via optional `.env` variables, not hardcoded** — see "Resolved
+decisions."
+
+**Per-account lockout.** After `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS` (optional
+`.env` variable, default `10`) consecutive failed attempts against a given
+`username` (tracked via `local_users.failed_login_attempts`), the account is
+locked: `locked_until` is set to `now() + LOCAL_LOGIN_LOCKOUT_MINUTES`
+(optional `.env` variable, default `15`) minutes. While `locked_until` is in
+the future, every attempt fails with `reason='locked'` (§2) regardless of
+the password supplied, and lockout state is **not** further modified by
+attempts made during the lockout window (so repeated retries during
+lockout cannot indefinitely extend it). Once `locked_until` has passed,
+attempts are evaluated normally again; a further wrong password immediately
+re-locks (extending `locked_until` again from that point, using whichever
+`LOCAL_LOGIN_LOCKOUT_MINUTES` value is configured at the moment of
+re-lock), and a correct password succeeds and clears both fields.
 
 **Per-source-IP throttle (secondary defense against spraying across many
 usernames from one source, which per-account lockout alone does not stop).**
 An in-memory, single-process counter (same class of mechanism, and same
 accepted "resets on restart" tradeoff, as CONTRACT-001's in-memory OIDC
 handshake store) tracks failed `/auth/local-login` attempts per source IP
-over a rolling 5-minute window. At `20` failed attempts from one source IP
-within that window, further attempts from that IP receive `429` (`{"error":
-"Too many sign-in attempts. Try again later."}`) without a user lookup or
-hashing, until the window rolls forward. This does not apply to
-`/admin/users*` — see the reasoning below.
+over a rolling `LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` (optional `.env`
+variable, default `5`) minute window. At
+`LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS` (optional `.env` variable, default
+`20`) failed attempts from one source IP within that window, further
+attempts from that IP receive `429` (`{"error":"Too many sign-in attempts.
+Try again later."}`) without a user lookup or hashing, until the window
+rolls forward. This does not apply to `/admin/users*` — see the reasoning
+below.
+
+**Configuration validation for all four variables above.** Each is
+**optional** — if absent, the stated default applies silently, with no
+startup error. This is a deliberate, narrow exception to this project's
+usual "required, with no implicit default" posture for `config.ts`
+variables (`COOKIE_SECURE`, `EMERGENCY_ROTATION_TOKEN`, etc.): Patrick
+explicitly asked for adjustable-with-sane-defaults here, not
+fail-closed-if-unset. If a variable **is** present, it must parse as a
+positive integer (base-10, no sign, no decimal point, strictly greater than
+zero); if present but unparseable or non-positive, the process fails closed
+at startup with a clear, non-secret-revealing error naming the variable —
+the same validate-when-present posture `config.ts` already applies to
+`PORT`.
 
 **No rate-limiting on the admin API's own bearer credential.** Consistent
 with CONTRACT-003's own reasoning for `EMERGENCY_ROTATION_TOKEN`:
@@ -477,26 +513,59 @@ resistance in any meaningful way — the caller already holds
 /admin/users`. Enumeration resistance only matters on the unauthenticated
 surface.
 
-### 5. Bootstrap: provisioning the first local user
+### 5. Bootstrap: provisioning the first local user via `scripts/seed.js`
 
-There is no chicken-and-egg problem for the admin API itself:
-`LOCAL_USER_ADMIN_TOKEN` is read from `.env` at process start, exactly like
-`EMERGENCY_ROTATION_TOKEN`, so the admin API is reachable as soon as the
-process is up — it requires no prior database seeding. Unlike
-`CLIENT_SECRET`/the initial signing key (which CONTRACT-001's login flow
-needs before it can handle its very first request, and which therefore
-*must* be seeded via `scripts/seed.js` before startup), no local user is
-needed until someone actually calls `/auth/local-login` — so **this contract
-does not require extending `scripts/seed.js`.** The first local user is
-created the same way every subsequent one is: `POST /admin/users` with
-`Authorization: Bearer <LOCAL_USER_ADMIN_TOKEN>`, once the service is
-running.
+**Confirmed by Patrick (2026-09-15): the first local user is provisioned by
+extending the existing `scripts/seed.js` bootstrap script (CONTRACT-004
+§4), not via a post-startup `POST /admin/users` call.** This reverses this
+contract's original default (an earlier draft reasoned that since
+`LOCAL_USER_ADMIN_TOKEN` needs no prior database seeding — unlike
+`CLIENT_SECRET`/the initial signing key, which CONTRACT-001's login flow
+needs before its very first request — no seed-script extension was
+strictly necessary). Patrick judged pre-staging a local user as part of the
+same one-time bootstrap flow more convenient than a separate manual `curl`
+step, and low-risk enough to do unconditionally — see "Not conditional on
+`LOCAL_LOGIN`" below.
 
-This is flagged as an explicit Open question rather than treated as
-obviously settled, since a `scripts/seed.js` extension (optionally seeding
-one local user at bootstrap time, mirroring how `CLIENT_SECRET`/the signing
-key are seeded) is a real, only-slightly-more-complex alternative that some
-operators might prefer for convenience in a fresh environment.
+**Extends the existing idempotent "determine what needs seeding" pattern
+(CONTRACT-004 §4) with one additional check, rather than introducing a
+parallel bootstrap mechanism.** On every invocation, alongside
+CONTRACT-004's existing `CLIENT_SECRET`/current-signing-key checks, the
+script also checks whether any row exists in `local_users`:
+
+- If at least one `local_users` row already exists: this piece is
+  considered already seeded. The script reports this and makes no changes
+  to `local_users` — mirroring CONTRACT-004 §4's existing per-piece skip
+  behavior for an already-present `CLIENT_SECRET`/current signing key.
+- If zero rows exist in `local_users`: the script prompts for a username, an
+  email, and a password, using the same input pattern already established
+  for `CLIENT_SECRET` — a hidden, not-echoed-to-terminal interactive prompt
+  by default, or a one-time, immediately-deleted input file for
+  non-interactive/scripted bootstrap (e.g. `--local-user-file=<path>`,
+  mirroring `--client-secret-file`'s read-once-then-unlink-or-abort
+  behavior). The file's exact format (e.g. one value per line: username,
+  then email, then password) is an implementation detail this contract
+  does not prescribe further.
+- The submitted password is hashed via the **same scrypt code path and
+  parameters** (§1) `POST /admin/users` uses — not a separate or
+  simplified routine — and the resulting row is inserted with
+  `is_active = true`, `failed_login_attempts = 0`, `locked_until = NULL`,
+  and `created_by` set to a fixed marker (e.g. `'seed-script'`), since no
+  admin-API caller/`actedBy` is involved in this path.
+
+**Not conditional on `LOCAL_LOGIN`.** This seeding step runs regardless of
+`LOCAL_LOGIN`'s value — seeding a local user is harmless and low-cost to
+pre-stage even in a deployment currently running Entra-only
+(`LOCAL_LOGIN=false`): an unused `local_users` row with no matching live
+login path is inert, not a security exposure, since `/auth/local-login`
+does not consult `local_users` at all while `LOCAL_LOGIN=false` (§7).
+
+**The admin API remains the mechanism for every subsequent local-user
+lifecycle action.** `scripts/seed.js` only ever provisions the *first*
+local user (exactly as it only ever provisions the *first* `CLIENT_SECRET`/
+signing key) — creating additional users, and updating or deleting any of
+them (including the one the seed script created), continues to go through
+`POST`/`PATCH`/`DELETE /admin/users*` as specified in §4.
 
 ### 6. Audit trail
 
@@ -519,11 +588,15 @@ audit-write failure handling.
 
 No retention/cleanup policy is specified — rows are never deleted by this
 contract's own behavior, mirroring CONTRACT-003/CONTRACT-004's stance on
-their own audit/history tables. This is flagged as a genuinely new
-consideration in Open questions, since (unlike the rare emergency-rotation
-trigger) `/auth/local-login` may be called very frequently by automated test
-suites, and unbounded audit-row growth from routine automated testing is a
-different operational shape than CONTRACT-003 ever had to consider.
+their own audit/history tables. **Explicitly deferred, not silently
+dropped:** unlike the rare emergency-rotation trigger, `/auth/local-login`
+may be called very frequently by automated test suites, so `local_login_audit`
+could grow substantially faster than any existing audit table in this
+project. Patrick has confirmed this is deferred to a separate future task,
+to be picked up once real testing activity has produced an actual growth
+pattern to design a retention policy against — not something this contract
+designs preemptively. See Open questions for the one-line pointer to this
+deferral.
 
 ### 7. Mode-switch flag — `LOCAL_LOGIN`
 
@@ -583,9 +656,7 @@ enough to implement; it is no longer an open design question.
   regardless of this flag's value, so an operator can provision/curate local
   user records whether or not local-login mode is currently active (e.g.
   pre-staging accounts before switching a deployment into local-only mode).
-  This is a separate judgment call, not directly addressed by Patrick's
-  words about the login-mode switch itself, and remains flagged in Open
-  questions.
+  **Confirmed by Patrick (2026-09-15)** — see "Resolved decisions."
 
 **A consequence worth stating plainly, not left implicit:** in a deployment
 running `LOCAL_LOGIN=true`, no one can sign in via Entra at all, including
@@ -669,6 +740,44 @@ otherwise had: a deployment intended purely for `LOCAL_LOGIN=true` testing
 can now omit `TENANT_ID`/`CLIENT_ID` from `.env` entirely, with no Entra app
 registration required at all to start the process.
 
+### 11. Minimal HTML login form — `GET /auth/local-login`
+
+**Confirmed by Patrick (2026-09-15): a minimal, unstyled HTML login form is
+added alongside the JSON API, not instead of it.** `GET /auth/local-login`
+serves a minimal HTML page containing a username/password form, live only
+when `LOCAL_LOGIN=true` — identical gating to `POST /auth/local-login`
+(§7): when `LOCAL_LOGIN=false`, `GET /auth/local-login` falls through to
+the same generic `404` response as any unmatched route.
+
+**Exactly one server-side credential-verification code path.** The HTML
+page's form submission calls the existing `POST /auth/local-login` JSON
+endpoint from client-side JavaScript (e.g. a small inline `fetch()` call),
+not a native HTML `<form>` POST with a different content type or target.
+The page itself contains no credential-verification logic of its own — it
+is purely a client-side convenience wrapper around the one JSON endpoint
+specified in §2, so every required behavior, failure taxonomy, brute-force
+protection (§3), and audit-trail guarantee (§6) already specified for
+`POST /auth/local-login` applies identically regardless of whether a given
+request originated from this page's `fetch()` call or a direct API call.
+This page introduces no second implementation to keep in sync with §2.
+
+**Rendering:** on a successful `POST` response (§2), the page replaces its
+form with a minimal "You're signed in." confirmation on the same page — no
+redirect logic is specified or required, consistent with this being an
+internal testing convenience rather than a production sign-in UX. On a
+failure response, the page renders the JSON body's `error` string directly
+next to the form, with no reinterpretation, translation, or embellishment
+— the same distinctions specified in §2 apply: unknown-username and
+wrong-password render the same generic text; disabled and locked render
+their own distinct text, including the locked response's exact unlock
+time.
+
+**Deliberately unstyled/minimal**, per NOTES.md's "no UI polish" posture —
+this is a functional convenience for a human tester who would otherwise
+need `curl`/Postman/a browser devtools `fetch()` call, not a polished
+sign-in page. No CSS framework, branding, or responsive design is required
+or expected.
+
 ## Postconditions and invariants
 
 **Postconditions (true after a successful local login):**
@@ -694,6 +803,16 @@ registration required at all to start the process.
   CONTRACT-003's audit table already establishes relative to `signing_keys`).
 - Exactly one new `local_user_admin_audit` row exists with
   `result = 'success'`, naming the action and affected user.
+
+**Postconditions (true after a `scripts/seed.js` run, §5):**
+- If `local_users` had zero rows before the run: exactly one `local_users`
+  row now exists, with `is_active = true`, `failed_login_attempts = 0`,
+  `locked_until = NULL`, `created_by = 'seed-script'` (or an equivalent
+  fixed marker), and a `password_hash`/`password_salt` produced via the
+  same scrypt parameters (§1) `POST /admin/users` uses.
+- If `local_users` had one or more rows before the run: no row in
+  `local_users` is added, changed, or removed by this step.
+- This postcondition holds regardless of `LOCAL_LOGIN`'s value (§5).
 
 **Invariants (always true):**
 - `LOCAL_USER_ADMIN_TOKEN` never appears in any log line, audit row,
@@ -738,6 +857,9 @@ registration required at all to start the process.
 | `LOCAL_LOGIN=true` and a request hits `GET /auth/login` or `GET /auth/callback` | 404 | Generic "Not found" — identical to any unmatched route; no Entra discovery fetch, handshake entry, or token exchange occurs (§7) |
 | `TENANT_ID` or `CLIENT_ID` missing/empty at startup while `LOCAL_LOGIN=false` | Process fails to start | Clear, non-secret-revealing error naming the missing variable(s) — unchanged from `config.ts`'s existing behavior (§10) |
 | `TENANT_ID`/`CLIENT_ID` missing/empty at startup while `LOCAL_LOGIN=true` | Not a startup error | Process starts normally; the values are simply unused (§10) |
+| Any of `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS`/`LOCAL_LOGIN_LOCKOUT_MINUTES`/`LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS`/`LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` present but not a positive integer at startup | Process fails to start | Clear, non-secret-revealing error naming the variable (§3) |
+| Any of the four above absent at startup | Not a startup error | The stated default applies silently (§3) |
+| `LOCAL_LOGIN=false` and a request hits `GET /auth/local-login` | 404 | Generic "Not found" — identical gating to the JSON endpoint (§7/§11) |
 | `/auth/local-login`: missing/empty `username` or `password` | 400 | `{"error":"username and password are required"}` |
 | `/auth/local-login`: per-source-IP throttle exceeded | 429 | `{"error":"Too many sign-in attempts. Try again later."}` |
 | `/auth/local-login`: unknown username or wrong password | 401 | `{"error":"Invalid username or password."}` — deliberately identical for both causes (§2) |
@@ -759,11 +881,12 @@ registration required at all to start the process.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `POST /auth/local-login` | None (public, subject to §3's throttling) | Verifies username/password; on success, mints and sets `bt_session` exactly as CONTRACT-001 §4–§7 define. Live only when `LOCAL_LOGIN=true`; otherwise falls through to generic 404 (§7). |
+| `GET /auth/local-login` | None (public) | Serves the minimal HTML login form (§11), a thin client-side wrapper around the JSON endpoint above. Live only when `LOCAL_LOGIN=true`; otherwise falls through to generic 404 — identical gating to the JSON endpoint (§7/§11). |
 | `GET /auth/login`, `GET /auth/callback` (CONTRACT-001, referenced not redefined) | Per CONTRACT-001 | Live only when `LOCAL_LOGIN=false`; otherwise fall through to generic 404 (§7) — this contract adds this new reachability condition on top of CONTRACT-001's existing routes without editing CONTRACT-001's own document. |
 | `POST /admin/users` | `Authorization: Bearer <LOCAL_USER_ADMIN_TOKEN>` | Create a local user. Body: `{ "username": string, "email": string, "password": string, "actedBy"?: string }`. `201` on success with the created user's public fields. |
 | `GET /admin/users` | Same | List all local users (no pagination in this milestone — see Scope > Excluded). `200` with `{ "users": [...] }`, never including password material. |
 | `GET /admin/users/:id` | Same | Fetch one local user by id. `200` or `404`. |
-| `PATCH /admin/users/:id` | Same | Update `email`, `password`, and/or `isActive` (at least one required). Body may include `actedBy`. Username is **not** renamable via this endpoint (see Open questions) — delete and recreate instead. `200` with the updated record. |
+| `PATCH /admin/users/:id` | Same | Update `email`, `password`, and/or `isActive` (at least one required). Body may include `actedBy`. Username is **not** renamable via this endpoint (confirmed by Patrick — see "Resolved decisions") — delete and recreate instead. `200` with the updated record. |
 | `DELETE /admin/users/:id` | Same | Hard-deletes the `local_users` row. `200` with `{"status":"deleted","id":string,"username":string}`. Audit history referencing this user is retained (Postconditions). |
 
 All admin responses include `Cache-Control: no-store`, matching CONTRACT-003's
@@ -809,16 +932,26 @@ one-way hash would add complexity (a dependency on `DB_ENCRYPTION_KEY` for a
 value that doesn't need it) without a corresponding security benefit. See
 "Resolved decisions" #1.
 
+Additionally, per Required behavior §5, this contract extends TASK-006's
+`scripts/seed.js` (CONTRACT-004 §4's bootstrap script) with one new,
+additional idempotent seeding step for the first `local_users` row. This is
+an extension to that script's implementation, not an edit to CONTRACT-004's
+own document: CONTRACT-004 defines the `CLIENT_SECRET`/signing-key seeding
+steps for a table CONTRACT-004 itself owns; this contract adds a sibling
+step to the same script for `local_users`, a table CONTRACT-004 does not
+define or depend on.
+
 **No interface to CONTRACT-003.** This contract does not read, set, or
 depend on `EMERGENCY_ROTATION_TOKEN`, and `LOCAL_USER_ADMIN_TOKEN` grants no
 authority over emergency rotation or vice versa (§4).
 
 ## UX expectations
 
-No browser-rendered login form or admin UI is provided or required by this
-contract (Scope > Excluded) — consistent with CONTRACT-001's "no UI polish"
-and CONTRACT-003's "no browser-facing admin UI" precedents. The minimum bar
-that does apply:
+A minimal, unstyled HTML login form exists (`GET /auth/local-login`, §11) —
+this is the one deliberate exception to CONTRACT-001's "no UI polish" and
+CONTRACT-003's "no browser-facing admin UI" precedents, which otherwise
+still hold in full: no admin UI is provided or required (Scope > Excluded).
+The minimum bar that does apply:
 
 - Every JSON error response is a small, flat object with a single `error`
   string — legible to a human reading raw JSON (e.g. via `curl`), free of
@@ -834,6 +967,11 @@ that does apply:
 - Success responses never include a password, password hash, or the session
   token value in their body, matching CONTRACT-001's "success response...
   must not expose the token value" posture.
+- The `GET /auth/local-login` HTML form (§11) is deliberately unstyled and
+  minimal — a functional convenience for a human tester, not a polished
+  sign-in page. It renders the same `error` text the JSON endpoint returns
+  (§2), with no separate wording of its own, and shows a minimal "You're
+  signed in." confirmation on success, on the same page, with no redirect.
 
 ## Validation requirements
 
@@ -861,15 +999,27 @@ that does apply:
   take approximately the same time as the merged 401 pair (confirming the
   uniform-cost computation still runs for these two causes, even though
   their response content is now intentionally distinct — §2).
-- Ten consecutive wrong-password attempts against one account lock it;
-  the eleventh attempt (even with the correct password) fails with the
-  distinct `423` locked response while `locked_until` is in the future;
-  after `locked_until` passes, the correct password succeeds and clears
-  both lockout fields.
-- Twenty-one failed attempts from one source IP within a 5-minute window
-  produce a `429` on the next attempt, regardless of which username is
-  targeted; a request from a different source IP in the same window is
-  unaffected.
+- With all four brute-force `.env` variables absent, ten consecutive
+  wrong-password attempts against one account lock it (default
+  `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS=10`); the eleventh attempt (even with the
+  correct password) fails with the distinct `423` locked response while
+  `locked_until` is in the future; after the default 15-minute
+  `locked_until` passes, the correct password succeeds and clears both
+  lockout fields.
+- With all four brute-force `.env` variables absent, twenty-one failed
+  attempts from one source IP within the default 5-minute window produce a
+  `429` on the next attempt (default `LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS=20`),
+  regardless of which username is targeted; a request from a different
+  source IP in the same window is unaffected.
+- Setting `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS=3`: confirm lockout now triggers
+  after 3 consecutive failures instead of the default 10.
+- Setting `LOCAL_LOGIN_LOCKOUT_MINUTES`, `LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS`,
+  and `LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` each to a non-default,
+  positive-integer value: confirm the corresponding threshold/window changes
+  accordingly.
+- Setting any of the four brute-force `.env` variables to a non-positive or
+  non-numeric value (e.g. `0`, `-1`, `"abc"`): confirm the process fails to
+  start with a clear error naming the specific variable.
 - `LOCAL_LOGIN=false`: confirm `POST /auth/local-login` returns the
   same `404` body as an arbitrary unmatched route, that no
   `local_login_audit` row is written for the attempt, that `GET
@@ -900,92 +1050,60 @@ that does apply:
   creation: confirm the value is not the plaintext password or any
   recognizable encoding of it, and that two users given the same password
   have different `password_hash` values (proving per-user salting).
+- Running `scripts/seed.js` against a database with zero `local_users` rows
+  results in exactly one new row, hashed via the same scrypt code path and
+  parameters `POST /admin/users` uses; running it again afterward reports
+  this piece already seeded and makes no further change to `local_users`
+  (§5).
+- Running `scripts/seed.js` with `LOCAL_LOGIN=false`: confirm the
+  `local_users` seeding step still runs (not conditional on `LOCAL_LOGIN`,
+  §5).
+- `GET /auth/local-login` with `LOCAL_LOGIN=true`: confirm the page loads,
+  submitting valid credentials via the rendered form results in the same
+  `bt_session` cookie a direct `POST /auth/local-login` call would produce
+  and a minimal "You're signed in." confirmation on the same page;
+  submitting invalid credentials shows the corresponding `401`/`403`/`423`
+  error text inline, unchanged from the JSON endpoint's own text (§11).
+- `GET /auth/local-login` with `LOCAL_LOGIN=false`: confirm the same generic
+  `404` response as any unmatched route (§11).
 - Confirm no HTTP response, at any endpoint this contract defines, ever
   contains `password_hash`, `password_salt`, `LOCAL_USER_ADMIN_TOKEN`, or a
   raw stack trace.
 
 ## Open questions
 
-Patrick has reviewed and decided four items from this contract's initial
-draft (password hashing algorithm, admin-token separation, enumeration
-messaging, and the `TENANT_ID`/`CLIENT_ID` startup requirement) — those are
-now recorded in "Resolved decisions" below, not here. The remaining items
-are genuine decision points still flagged explicitly rather than buried in
-prose, so they can be approved, amended, or rejected quickly.
+Patrick has reviewed and decided every substantive item originally raised
+here across two rounds of feedback (password hashing algorithm,
+admin-token separation, enumeration messaging, the `TENANT_ID`/`CLIENT_ID`
+startup requirement, configurable brute-force thresholds, the
+`scripts/seed.js` bootstrap path, the HTML login form, admin-API gating,
+and username rename) — all of those are now recorded in "Resolved
+decisions" below, not here. One item remains, an explicit deferral (not a
+decision point):
 
-1. **`10` failed attempts / `15`-minute lockout, and `20` failed attempts /
-   5-minute per-IP throttle window, are my own arbitrary numeric choices**,
-   not derived from any stated requirement — analogous to CONTRACT-003's
-   Open question #4 flagging its own arbitrary 32-character minimum. Worth
-   an explicit call, especially since automated test suites hammering this
-   endpoint could plausibly trip either threshold unintentionally during
-   normal test runs, not just during an actual attack.
+1. **Retention/cleanup for `local_login_audit` is explicitly deferred to a
+   separate future task** (TASK-014, filed in `tasks/proposed/`), to be
+   picked up once real testing activity has produced an actual growth
+   pattern to design a retention policy against — not something this
+   contract designs preemptively. This contract's own scope stops at
+   flagging the deferral (§6).
 
-2. **Bootstrapping the first local user via `POST /admin/users` after
-   startup, rather than extending `scripts/seed.js`.** This avoids touching
-   CONTRACT-004's bootstrap script (which that contract scopes narrowly to
-   `CLIENT_SECRET`/the initial signing key) but means a fresh environment
-   needs one extra manual `curl` step post-startup rather than everything
-   coming from one seed run. If Patrick would rather `scripts/seed.js`
-   optionally seed a first local user too, that's a small, well-precedented
-   addition — flagged rather than assumed.
-
-3. **JSON-only `/auth/local-login`, no HTML login form**, even though
-   Patrick's stated motivation includes real people logging in during
-   testing (not only automated checks). A person can still drive this via
-   `curl`/Postman/a browser devtools `fetch()` call, but a minimal HTML form
-   would be materially more usable for a non-technical tester. Not designed
-   here since NOTES.md's "no UI polish" precedent argues against it, but
-   flagged explicitly since the "real people" framing pulls the other way.
-
-4. **The admin CRUD API (`/admin/users*`) is not gated by
-   `LOCAL_LOGIN`** — it stays reachable (behind its own token)
-   regardless of the mode switch, so records can be managed independent of
-   which login path is currently live. An alternative is gating it under
-   the same flag (e.g. read-only, or entirely unreachable, while
-   `LOCAL_LOGIN=false`) for tighter surface reduction. Patrick's confirmed
-   words describe the *login* switch precisely but don't address the admin
-   API; flagged as a judgment call either way has real merit.
-
-5. **No username rename via `PATCH` — only `email`/`password`/`isActive`
-   are updatable; a rename requires delete-and-recreate (getting a new
-   `id`/`sub`).** This keeps `sub` stability simple (a rename never silently
-   changes what `sub` a username maps to) but is a real limitation if
-   Patrick expects testers' usernames to need correction without losing
-   their `id`-keyed identity. Worth an explicit call.
-
-6. **No retention or cleanup policy for `local_login_audit`.** Unlike
-   CONTRACT-003's rare kill-switch trigger, `/auth/local-login` may be
-   called very frequently by automated test suites, so this table could
-   grow substantially faster than any existing audit table in this project.
-   I did not design a retention policy (mirroring CONTRACT-003/CONTRACT-004's
-   "no retention policy required" stance on their own audit/history
-   tables), but flag this as a materially different operational shape
-   worth an explicit decision, rather than silently assuming the same
-   "never delete" posture scales the same way here.
-
-7. **Whether this decision (a permanent local-login path, reversing part
-   of NOTES.md §3's original Entra-only reasoning) warrants its own ADR**,
-   the way ADR-002 recorded the break-glass decision, for the same
-   "keep lasting project knowledge in the repository" reason CLAUDE.md
-   states. I did not write one, since I wasn't asked to and it's not
-   strictly this role's responsibility, but flag it as a reasonable
-   process step alongside approving this contract.
-
-8. **No task file exists yet for this work** (see header). Per CLAUDE.md,
-   implementation cannot begin without an approved task; this contract
-   alone does not authorize building anything. Flagged so this isn't
-   mistaken for an oversight when no implementation follows immediately
-   from approving this document.
+Whether this decision warrants its own ADR is resolved: see
+[ADR-003](../decisions/ADR-003-local-login-alongside-entra.md), header
+"Related ADRs." No task file exists yet for this contract's own
+implementation — see header; per CLAUDE.md, implementation cannot begin
+without an approved task, and this contract alone does not authorize
+building anything.
 
 ## Resolved decisions
 
 Items 1–7 below are judgment calls I made because no prior document settled
 them, which I judged low-risk/easily-reversible enough to state as default
-required behavior rather than list as open questions. Items 8–11 are
+required behavior rather than list as open questions. Items 8–16 are
 Patrick's own direct confirmations of items that *were* originally listed as
-open questions in an earlier draft of this contract. All remain changeable
-on review like anything else in a `Proposed` contract.
+open questions in an earlier draft of this contract (across two rounds of
+feedback). All remain changeable on review like anything else in a
+`Proposed` contract.
 
 1. **Password hashes are stored as plain `bytea`, not further wrapped in
    CONTRACT-004's AES-GCM envelope encryption.** A one-way hash does not
@@ -1052,3 +1170,41 @@ on review like anything else in a `Proposed` contract.
     `config.ts`'s validation logic (a TASK-007 implementation choice), not
     CONTRACT-001's own approved text — see §10 for why no ADR-001
     immutability conflict arises.
+12. **Lockout/throttle thresholds are configurable via optional `.env`
+    variables, not hardcoded.** Confirmed by Patrick (2026-09-15). This
+    **is** a behavior change from the original draft (which hardcoded `10`/
+    `15`/`20`/`5`) — see Required behavior §3, Preconditions, Interfaces
+    (Inputs), the Failure behavior table, and Validation requirements. Final
+    variable names and defaults: `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS` (default
+    `10`), `LOCAL_LOGIN_LOCKOUT_MINUTES` (default `15`),
+    `LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS` (default `20`), and
+    `LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` (default `5`). Each is
+    optional (validated-if-present, silently defaulted-if-absent) — the one
+    deliberate exception in this contract to the project's usual
+    required-with-no-implicit-default posture, per Patrick's explicit
+    request for adjustable-with-sane-defaults rather than
+    fail-closed-if-unset.
+13. **The first local user is bootstrapped via `scripts/seed.js`, not
+    `POST /admin/users`.** Confirmed by Patrick (2026-09-15), reversing this
+    contract's original default. This **is** a behavior change — see
+    Required behavior §5 (rewritten, not appended to), the new
+    Postconditions group for a `scripts/seed.js` run, Interfaces > "Interface
+    to CONTRACT-004," the header's "Related tasks," and Validation
+    requirements. Runs unconditionally (not gated by `LOCAL_LOGIN`) and uses
+    the same scrypt hashing path as the admin API.
+14. **A minimal, unstyled HTML login form is added at `GET
+    /auth/local-login`, alongside the JSON API.** Confirmed by Patrick
+    (2026-09-15). This **is** a behavior change — see Required behavior §11
+    (new), Scope (moved from Excluded to Included), Interfaces (new HTTP
+    endpoint row), the Failure behavior table, UX expectations, and
+    Validation requirements. The form is a pure client-side wrapper around
+    the existing `POST /auth/local-login` endpoint — no second
+    credential-verification code path is introduced.
+15. **The admin CRUD API (`/admin/users*`) remains ungated by
+    `LOCAL_LOGIN`.** Confirmed by Patrick (2026-09-15). No behavior change —
+    Required behavior §7 already specified this; only the "flagged as a
+    judgment call" framing there is updated to reflect confirmation.
+16. **No username rename via `PATCH` — only `email`/`password`/`isActive`
+    are updatable.** Confirmed by Patrick (2026-09-15). No behavior change —
+    Interfaces already specified this; only the "see Open questions"
+    cross-reference there is updated to point to this confirmation.

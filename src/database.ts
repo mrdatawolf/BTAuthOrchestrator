@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS signing_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS signing_keys_one_current
   ON signing_keys ((true))
   WHERE status = 'current';
+
+CREATE TABLE IF NOT EXISTS emergency_rotation_audit (
+  id text PRIMARY KEY,
+  triggered_at timestamptz NOT NULL DEFAULT now(),
+  result text NOT NULL CHECK (result IN ('success', 'failure')),
+  triggered_by text,
+  source_ip text,
+  previous_kid text,
+  new_kid text,
+  failure_reason text
+);
 `;
 
 export interface DatabaseHandle {

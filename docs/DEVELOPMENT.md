@@ -21,12 +21,19 @@
 ## Setup and commands
 
 Copy `.env.example` to `.env` and replace its example values as appropriate.
-All seven listed variables must be non-empty, and `PORT` must be an integer from
+All eight listed variables must be non-empty, and `PORT` must be an integer from
 1 through 65535.
 
 `SERVICE_ISSUER` sets the session-token `iss` claim. Production must use
 `https://orca.biztechro.com`; non-production deployments may use their own
 canonical issuer value.
+
+`EMERGENCY_ROTATION_TOKEN` is the dedicated bearer credential for
+`POST /admin/emergency-rotate-keys` (CONTRACT-003). It must be at least 32
+characters and is unrelated to any Entra identity, `bt_session` cookie, or
+`CLIENT_SECRET`; generate it with, e.g., `openssl rand -hex 32`. The service
+fails closed at startup if it is missing or shorter than 32 characters, the
+same posture as `DB_ENCRYPTION_KEY`.
 
 ```sh
 npm install
@@ -67,6 +74,35 @@ key. For non-interactive setup, use
 file is deleted immediately after it is read and before the database is opened.
 Never pass the secret itself on the command line. `npm run seed` is a convenience
 alias that builds first and then runs the same entry point.
+
+The emergency key-rotation trigger (CONTRACT-003, "kill switch") is
+implemented at `POST /admin/emergency-rotate-keys`. It authenticates via a
+`Authorization: Bearer <EMERGENCY_ROTATION_TOKEN>` header only — a valid
+`bt_session` cookie never substitutes for this credential, and the token is
+compared with `crypto.timingSafeEqual` (never `===`) to avoid a timing side
+channel. On success it generates a fresh RS256 key pair in-process,
+atomically (one PGlite transaction) revokes the previously current signing
+key (`status = 'revoked'`, `revoked_at` set, no `retired` intermediate
+state), inserts the new key as `current`, and writes a
+`result = 'success'` row to `emergency_rotation_audit`, then responds `200`
+with `{"status":"rotated","previousKid","newKid","rotatedAt"}` and
+`Cache-Control: no-store`. A missing/malformed/incorrect `Authorization`
+header returns a generic `401 {"error":"Unauthorized"}`; a failure during key
+generation or rotation returns a generic
+`500 {"error":"Unable to complete emergency rotation"}`; any other method or
+path falls through to the existing generic `404`. Every trigger attempt
+(success or failure) writes one row to `emergency_rotation_audit`
+(`id`, `triggered_at`, `result`, `triggered_by`, `source_ip`, `previous_kid`,
+`new_kid`, `failure_reason`); if that write itself cannot be performed, the
+service emits a server-side log line backstop naming only a timestamp and
+failure category, never the credential value or any secret material. The
+optional JSON request body `{"triggeredBy"?: string}` is an unverified,
+operator-self-asserted label stored verbatim when present and `null`
+otherwise — it is never part of the authorization decision and a malformed
+value never causes the request to fail. Concurrent trigger requests are not
+rejected or deduplicated; each independently rotates, and PGlite's
+transactional guarantee (exactly one `current` row) serializes them into
+consecutive rotations, which is the intended outcome, not an error.
 
 On startup, the service creates `PGLITE_DATA_DIR` with mode `0700` when it is
 absent, verifies an existing directory is mode `0700` and owned by the running

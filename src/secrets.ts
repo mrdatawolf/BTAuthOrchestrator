@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 
 import type { PGlite } from "@electric-sql/pglite";
 
@@ -13,6 +13,13 @@ export interface SigningKeyInput {
   algorithm: string;
   publicKeyPem: string;
   privateKeyPem: string;
+}
+
+// Attribution/context metadata carried into an emergency-rotation audit row.
+// Never used in any authorization decision (CONTRACT-003 §4).
+export interface EmergencyRotationAuditContext {
+  triggeredBy: string | null;
+  sourceIp: string | null;
 }
 
 export interface SecretsStore {
@@ -33,6 +40,28 @@ export interface SecretsStore {
     publicKeyPem: string;
     status: "current" | "retired";
   }>>;
+  // CONTRACT-003 §3/§7: atomically revokes the current signing key (if any),
+  // inserts the freshly generated key as current, and writes a
+  // result = 'success' emergency_rotation_audit row, all inside one
+  // transaction, so a committed rotation and its audit row can never
+  // diverge. Throws (rolling back the whole transaction — no partial
+  // signing_keys row, no phantom audit row) if any step fails; the caller
+  // is responsible for writing a separate result = 'failure' audit row in
+  // that case (see recordEmergencyRotationFailure), since a failed
+  // transaction here cannot itself carry a committed audit row.
+  rotateSigningKeyEmergency(
+    newKey: SigningKeyInput,
+    audit: EmergencyRotationAuditContext,
+  ): Promise<{ previousKid: string | null; newKid: string }>;
+  // CONTRACT-003 §4/Failure behavior: records a failed trigger attempt
+  // (bad credential, or a rotation attempt that failed) as its own,
+  // non-transactional row — there is no rotation to couple it to
+  // atomically. Best effort: the caller must catch a rejection from this
+  // function and fall back to the server-side log-line backstop rather
+  // than letting it fail the HTTP response.
+  recordEmergencyRotationFailure(
+    input: EmergencyRotationAuditContext & { failureReason: string },
+  ): Promise<void>;
 }
 
 interface CurrentSigningKeyRow {
@@ -181,6 +210,61 @@ export function createSecretsStore(database: PGlite, dbEncryptionKeyHex: string)
     }));
   }
 
+  async function rotateSigningKeyEmergency(
+    newKey: SigningKeyInput,
+    audit: EmergencyRotationAuditContext,
+  ): Promise<{ previousKid: string | null; newKid: string }> {
+    const encryptedPrivateKey = encryptValue(Buffer.from(newKey.privateKeyPem, "utf8"), newKey.kid);
+    return database.transaction(async (transaction) => {
+      const current = await transaction.query<{ kid: string }>(
+        "SELECT kid FROM signing_keys WHERE status = 'current'",
+      );
+      const previousKid = current.rows[0]?.kid ?? null;
+
+      if (previousKid !== null) {
+        await transaction.query(
+          `UPDATE signing_keys SET status = 'revoked', revoked_at = now() WHERE kid = $1`,
+          [previousKid],
+        );
+      }
+
+      await transaction.query(
+        `INSERT INTO signing_keys (
+           kid, algorithm, status, public_key,
+           private_key_ciphertext, private_key_iv, private_key_auth_tag
+         ) VALUES ($1, $2, 'current', $3, $4, $5, $6)`,
+        [
+          newKey.kid,
+          newKey.algorithm,
+          newKey.publicKeyPem,
+          encryptedPrivateKey.ciphertext,
+          encryptedPrivateKey.iv,
+          encryptedPrivateKey.authTag,
+        ],
+      );
+
+      await transaction.query(
+        `INSERT INTO emergency_rotation_audit (
+           id, result, triggered_by, source_ip, previous_kid, new_kid, failure_reason
+         ) VALUES ($1, 'success', $2, $3, $4, $5, NULL)`,
+        [randomUUID(), audit.triggeredBy, audit.sourceIp, previousKid, newKey.kid],
+      );
+
+      return { previousKid, newKid: newKey.kid };
+    });
+  }
+
+  async function recordEmergencyRotationFailure(
+    input: EmergencyRotationAuditContext & { failureReason: string },
+  ): Promise<void> {
+    await database.query(
+      `INSERT INTO emergency_rotation_audit (
+         id, result, triggered_by, source_ip, previous_kid, new_kid, failure_reason
+       ) VALUES ($1, 'failure', $2, $3, NULL, NULL, $4)`,
+      [randomUUID(), input.triggeredBy, input.sourceIp, input.failureReason],
+    );
+  }
+
   return {
     encryptValue,
     decryptValue,
@@ -189,5 +273,7 @@ export function createSecretsStore(database: PGlite, dbEncryptionKeyHex: string)
     insertSigningKey,
     getCurrentSigningKey,
     listPublishableSigningKeys,
+    rotateSigningKeyEmergency,
+    recordEmergencyRotationFailure,
   };
 }

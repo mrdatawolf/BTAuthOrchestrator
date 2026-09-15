@@ -1,4 +1,6 @@
-import { createServer, type RequestListener } from "node:http";
+import { generateKeyPair, randomUUID, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type RequestListener } from "node:http";
+import { promisify } from "node:util";
 
 import { exportJWK, importSPKI } from "jose";
 
@@ -21,6 +23,8 @@ import {
 import { createSecretsStore, type SecretsStore } from "./secrets.js";
 import { mintSessionToken, nextLocalMidnightEpochSeconds } from "./tokens.js";
 
+const generateKeyPairAsync = promisify(generateKeyPair);
+
 const SESSION_COOKIE_NAME = "bt_session";
 // Fixed by CONTRACT-001 §7 ("the parent domain shared by all consuming
 // apps"); not operator-configurable in this milestone.
@@ -33,8 +37,86 @@ const SIGN_IN_EXPIRED_MESSAGE = "Your sign-in attempt has expired or is no longe
 const SIGN_IN_INCOMPLETE_MESSAGE = "Your sign-in attempt could not be completed. Please start again.";
 const GENERIC_SERVER_ERROR_MESSAGE = "Something went wrong signing you in; this has been logged.";
 
+// CONTRACT-003: a generous but bounded cap on the optional JSON request body
+// (`{ "triggeredBy"?: string }`) for the emergency-rotation trigger, to avoid
+// buffering an unbounded request body in memory before authentication is even
+// checked. Not specified by the contract; a narrow implementation judgment
+// call, flagged in the handoff.
+const EMERGENCY_ROTATION_BODY_LIMIT_BYTES = 16_384;
+const EMERGENCY_ROTATION_RESPONSE_HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  "Cache-Control": "no-store",
+};
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function extractBearerToken(headerValue: string | string[] | undefined): string | null {
+  if (typeof headerValue !== "string") return null;
+  const prefix = "Bearer ";
+  if (!headerValue.startsWith(prefix)) return null;
+  const token = headerValue.slice(prefix.length);
+  return token.length > 0 ? token : null;
+}
+
+// Constant-time comparison per CONTRACT-003 §2: unequal lengths are an
+// immediate mismatch without a data-dependent comparison of contents; equal
+// lengths are compared via crypto.timingSafeEqual, never `===`.
+function constantTimeTokenMatches(candidate: string, expected: string): boolean {
+  const candidateBuffer = Buffer.from(candidate, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  if (candidateBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bufferChunk: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+    size += bufferChunk.length;
+    if (size > EMERGENCY_ROTATION_BODY_LIMIT_BYTES) {
+      throw new Error("Request body exceeds the maximum accepted size.");
+    }
+    chunks.push(bufferChunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// CONTRACT-003 Failure behavior: a missing/empty/non-string `triggeredBy` (or
+// an unparseable body) is stored as null and never treated as a failure —
+// this field is a convenience label only, never part of the authorization
+// decision.
+function extractTriggeredBy(bodyText: string): string | null {
+  if (bodyText.trim() === "") return null;
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "triggeredBy" in parsed &&
+      typeof (parsed as { triggeredBy?: unknown }).triggeredBy === "string" &&
+      (parsed as { triggeredBy: string }).triggeredBy !== ""
+    ) {
+      return (parsed as { triggeredBy: string }).triggeredBy;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// CONTRACT-003 Interfaces: best-effort proxy-forwarded client address (first
+// X-Forwarded-For entry) when reachable via the configured reverse proxy,
+// otherwise the raw socket peer address. Audit metadata only.
+function extractSourceIp(request: IncomingMessage): string | null {
+  const forwardedFor = request.headers["x-forwarded-for"];
+  const forwardedValue = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  if (typeof forwardedValue === "string" && forwardedValue.trim() !== "") {
+    return forwardedValue.split(",")[0]!.trim();
+  }
+  return request.socket.remoteAddress ?? null;
 }
 
 function renderHtml(status: number, title: string, message: string): { status: number; headers: Record<string, string>; body: string } {
@@ -211,6 +293,82 @@ export function createRequestHandler(secretsStore: SecretsStore, config: Config)
     }
   }
 
+  async function writeEmergencyRotationFailureAudit(input: {
+    triggeredBy: string | null;
+    sourceIp: string | null;
+    failureReason: string;
+  }): Promise<void> {
+    try {
+      await secretsStore.recordEmergencyRotationFailure(input);
+    } catch (error) {
+      // CONTRACT-003 Failure behavior: never block the caller's response on
+      // this write; fall back to a server-side log-line backstop naming only
+      // a timestamp and failure category — never the credential value or any
+      // secret material.
+      console.error(
+        `Emergency rotation audit write failed; log-line backstop: timestamp=${new Date().toISOString()} failureReason=${input.failureReason}: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  async function handleEmergencyRotateKeys(
+    request: IncomingMessage,
+  ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+    const sourceIp = extractSourceIp(request);
+
+    let bodyText = "";
+    try {
+      bodyText = (await readRequestBody(request)).toString("utf8");
+    } catch (error) {
+      // An oversized/unreadable body is not an authorization decision; it
+      // just means triggeredBy is unavailable for this attempt.
+      console.error(`Emergency rotation request body could not be read: ${errorMessage(error)}`);
+    }
+    const triggeredBy = extractTriggeredBy(bodyText);
+
+    const token = extractBearerToken(request.headers.authorization);
+    if (token === null || !constantTimeTokenMatches(token, config.emergencyRotationToken)) {
+      await writeEmergencyRotationFailureAudit({ triggeredBy, sourceIp, failureReason: "bad_credential" });
+      return {
+        status: 401,
+        headers: EMERGENCY_ROTATION_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: "Unauthorized" }),
+      };
+    }
+
+    try {
+      const kid = randomUUID();
+      const { publicKey, privateKey } = await generateKeyPairAsync("rsa", {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+      const result = await secretsStore.rotateSigningKeyEmergency(
+        { kid, algorithm: "RS256", publicKeyPem: publicKey, privateKeyPem: privateKey },
+        { triggeredBy, sourceIp },
+      );
+      const rotatedAt = new Date();
+      return {
+        status: 200,
+        headers: EMERGENCY_ROTATION_RESPONSE_HEADERS,
+        body: JSON.stringify({
+          status: "rotated",
+          previousKid: result.previousKid,
+          newKid: result.newKid,
+          rotatedAt: rotatedAt.toISOString(),
+        }),
+      };
+    } catch (error) {
+      console.error(`Emergency key rotation failed: ${errorMessage(error)}`);
+      await writeEmergencyRotationFailureAudit({ triggeredBy, sourceIp, failureReason: "rotation_error" });
+      return {
+        status: 500,
+        headers: EMERGENCY_ROTATION_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: "Unable to complete emergency rotation" }),
+      };
+    }
+  }
+
   return async (request, response) => {
     if (request.method === "GET" && request.url === "/auth/login") {
       const result = await handleLogin();
@@ -266,6 +424,13 @@ export function createRequestHandler(secretsStore: SecretsStore, config: Config)
         });
         response.end(JSON.stringify({ error: "Unable to publish signing keys" }));
       }
+      return;
+    }
+
+    if (request.method === "POST" && (request.url ?? "").split("?")[0] === "/admin/emergency-rotate-keys") {
+      const result = await handleEmergencyRotateKeys(request);
+      response.writeHead(result.status, result.headers);
+      response.end(result.body);
       return;
     }
 

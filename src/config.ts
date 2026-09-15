@@ -6,7 +6,10 @@ const requiredVariables = [
   "TENANT_ID",
   "CLIENT_ID",
   "SERVICE_ISSUER",
+  "EMERGENCY_ROTATION_TOKEN",
 ] as const;
+
+const EMERGENCY_ROTATION_TOKEN_MIN_LENGTH = 32;
 
 export interface Config {
   port: number;
@@ -16,6 +19,7 @@ export interface Config {
   tenantId: string;
   clientId: string;
   issuer: string;
+  emergencyRotationToken: string;
 }
 
 export function loadConfig(environment: NodeJS.ProcessEnv): Config {
@@ -40,6 +44,17 @@ export function loadConfig(environment: NodeJS.ProcessEnv): Config {
     invalid.push("DB_ENCRYPTION_KEY (must be exactly 64 lowercase hexadecimal characters)");
   }
 
+  const emergencyRotationTokenValue = environment.EMERGENCY_ROTATION_TOKEN?.trim();
+  if (
+    emergencyRotationTokenValue !== undefined &&
+    emergencyRotationTokenValue !== "" &&
+    emergencyRotationTokenValue.length < EMERGENCY_ROTATION_TOKEN_MIN_LENGTH
+  ) {
+    invalid.push(
+      `EMERGENCY_ROTATION_TOKEN (must be at least ${EMERGENCY_ROTATION_TOKEN_MIN_LENGTH} characters)`,
+    );
+  }
+
   if (missing.length > 0 || invalid.length > 0) {
     const details = [
       missing.length > 0
@@ -61,5 +76,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv): Config {
     tenantId: environment.TENANT_ID!.trim(),
     clientId: environment.CLIENT_ID!.trim(),
     issuer: environment.SERVICE_ISSUER!.trim(),
+    emergencyRotationToken: environment.EMERGENCY_ROTATION_TOKEN!.trim(),
   };
 }

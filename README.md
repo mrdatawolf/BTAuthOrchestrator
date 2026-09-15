@@ -1,23 +1,70 @@
-# Project Template
+# BTAuthOrchestrator
 
-A repository template for human-led software development with specialized AI
-agents, explicit approval gates, behavioral contracts, and independent review.
+BTAuthOrchestrator is the org's unified authentication service for
+internally-built tools. Today each internal tool rolls its own local
+login — that doesn't scale past one app and makes deprovisioning a leaver
+error-prone. BTAuthOrchestrator fixes that by being the one thing that
+authenticates users (via Microsoft Entra ID / O365, over standard OIDC) and
+mints a signed session token every internal tool can verify on its own,
+without a hard runtime dependency on this service being up.
 
-Start with `CLAUDE.md`, then read `AGENTS.md` and
-`docs/AI_DEVELOPMENT_SYSTEM.md`.
+It is not a general-purpose IdP product and does not support external or
+non-employee identities — see `NOTES.md` for the full design rationale.
 
-Active work is tracked through plan files in `tasks/`. The directory containing a
-task is its authoritative workflow state.
+## Status
 
-## Origin of Design by Contract
+Milestone 1-2 (Entra app registration through the offline-verification
+proof) is implemented and accepted. The one open item is TASK-003d: TLS
+termination in front of the service, blocked on Cloudflare DNS
+credentials. See `tasks/completed/` for what's shipped and
+`tasks/approved/` for what's next.
 
-The "DbC" in this template's name refers to Design by Contract, a methodology
-originated by Bertrand Meyer in the 1980s and first realized in the Eiffel
-programming language. It formalizes software correctness through preconditions,
-postconditions, and invariants — obligations and guarantees shared between a
-component and its callers. This template borrows the spirit of that discipline
-(explicit obligations, verifiable behavior, clear responsibility boundaries) and
-applies it to the human/agent development process itself.
+## Setup
 
-Further reading: Bertrand Meyer, *Object-Oriented Software Construction*
-(Prentice Hall, 1988; 2nd ed. 1997).
+```sh
+npm install
+cp .env.example .env   # fill in the values below
+npm run build
+npm run seed            # one-time: stores CLIENT_SECRET and the initial signing key
+npm start
+```
+
+`.env` requires eight variables (see `.env.example`): `PORT`,
+`PGLITE_DATA_DIR`, `DB_ENCRYPTION_KEY`, `COOKIE_SECURE`, `TENANT_ID`,
+`CLIENT_ID`, `SERVICE_ISSUER`, and `EMERGENCY_ROTATION_TOKEN`. The service
+fails closed at startup if any is missing or invalid — there is no silent
+default.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `npm run dev` | Build, then start. |
+| `npm run build` | Type-check and compile to `dist/`. |
+| `npm run seed` | Build, then run the one-time bootstrap (stores `CLIENT_SECRET`, generates the initial signing key). Safe to re-run; refuses if already seeded. |
+| `npm start` | Run the compiled service. |
+| `npm run verify-offline` | Build, then run a standalone, re-runnable proof that a minted token verifies completely offline and that a rotated-out key's tokens correctly fail. |
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness check. |
+| `GET /auth/login` | Starts the OIDC flow: redirects to Entra with PKCE/state/nonce. |
+| `GET /auth/callback` | Entra's registered redirect URI; on success, sets the `bt_session` cookie. |
+| `GET /.well-known/jwks.json` | Public signing keys (current + retired), for any consuming app to verify tokens independently. |
+| `POST /admin/emergency-rotate-keys` | Break-glass "kill switch": immediately rotates the signing key and invalidates every outstanding session, org-wide. Bearer-token authenticated, separate from any user session. |
+
+## Learn more
+
+- `docs/DEVELOPMENT.md` — full technical detail: tech stack, repository
+  layout, exact request/response behavior, and every command above in
+  depth.
+- `docs/contracts/` — the behavioral contracts (`CONTRACT-001` login flow,
+  `CONTRACT-003` emergency rotation, `CONTRACT-004` encrypted storage)
+  this service is built against.
+- `NOTES.md` — the original design rationale and open questions.
+- `CLAUDE.md` / `AGENTS.md` — how work on this repo is planned, approved,
+  and reviewed.
+- `tasks/` — the authoritative record of what's done, in progress, or
+  planned; the directory a task file lives in is its status.

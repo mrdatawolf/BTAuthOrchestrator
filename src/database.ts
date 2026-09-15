@@ -79,6 +79,24 @@ CREATE TABLE IF NOT EXISTS local_login_audit (
   failure_reason text,
   source_ip text
 );
+
+-- CONTRACT-005 §1/§4/§6 (TASK-016). One row per admin CRUD action (create,
+-- update, delete) and per admin-API authentication failure. Read-only
+-- actions (GET /admin/users, GET /admin/users/:id) are deliberately not in
+-- the action CHECK below and are not audited on success — §6 names exactly
+-- these four action values, not a "read" action.
+CREATE TABLE IF NOT EXISTS local_user_admin_audit (
+  id text PRIMARY KEY,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  action text NOT NULL CHECK (action IN ('create', 'update', 'delete', 'auth_failure')),
+  target_user_id text,
+  target_username text,
+  changed_fields text,
+  result text NOT NULL CHECK (result IN ('success', 'failure')),
+  failure_reason text,
+  actor_label text,
+  source_ip text
+);
 `;
 
 export interface DatabaseHandle {

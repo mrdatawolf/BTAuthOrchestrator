@@ -42,12 +42,11 @@ characters and is unrelated to any Entra identity, `bt_session` cookie, or
 fails closed at startup if it is missing or shorter than 32 characters, the
 same posture as `DB_ENCRYPTION_KEY`.
 
-`LOCAL_USER_ADMIN_TOKEN` is the dedicated bearer credential reserved for the
-future local-user admin API (`/admin/users*`, CONTRACT-005 §4, TASK-016).
-Same format/length rule as `EMERGENCY_ROTATION_TOKEN` (at least 32
-characters, fails closed at startup otherwise) and deliberately a separate
-value from it on least-privilege grounds — this task (TASK-015) only adds
-its config validation; the admin API itself does not exist yet.
+`LOCAL_USER_ADMIN_TOKEN` is the dedicated bearer credential for the local-user
+admin API (`/admin/users*`, CONTRACT-005 §4, TASK-016). Same format/length
+rule as `EMERGENCY_ROTATION_TOKEN` (at least 32 characters, fails closed at
+startup otherwise) and deliberately a separate value from it on
+least-privilege grounds.
 
 ```sh
 npm install
@@ -89,13 +88,12 @@ makes `GET /auth/login`/`GET /auth/callback` fall through to the same
 generic `404` used by any unmatched route (no discovery fetch, no handshake
 entry, no token exchange executes). `LOCAL_LOGIN=false` is the reverse:
 `POST /auth/local-login` is the one that 404s, and Entra's routes behave
-exactly as CONTRACT-001 already specifies. `GET /.well-known/jwks.json` and
-`POST /admin/emergency-rotate-keys` are unaffected by this flag in either
-state. `GET /auth/local-login` (a minimal HTML login form) is **not**
-implemented by this task — it remains a generic `404` regardless of
-`LOCAL_LOGIN`'s value until TASK-018 adds it, and the admin CRUD API
-(`/admin/users*`) likewise does not exist yet (TASK-016) — any request to it
-currently 404s too, from either mode.
+exactly as CONTRACT-001 already specifies. `GET /.well-known/jwks.json`,
+`POST /admin/emergency-rotate-keys`, and the admin CRUD API (`/admin/users*`,
+see below) are all unaffected by this flag in either state. `GET
+/auth/local-login` (a minimal HTML login form) is **not** implemented yet —
+it remains a generic `404` regardless of `LOCAL_LOGIN`'s value until
+TASK-018 adds it.
 
 When `LOCAL_LOGIN=true`, `TENANT_ID`/`CLIENT_ID` are not required and may be
 absent from `.env` entirely; when present anyway they are simply unused.
@@ -142,6 +140,60 @@ accepted tradeoff as the OIDC handshake store. Every `/auth/local-login`
 attempt (success or failure) writes one row to `local_login_audit`,
 best-effort — a malformed request (missing/invalid body) is rejected `400`
 before any lookup, hashing, or audit write occurs.
+
+#### Local user admin API (CONTRACT-005 §4, TASK-016)
+
+`POST /admin/users`, `GET /admin/users`, `GET /admin/users/:id`,
+`PATCH /admin/users/:id`, and `DELETE /admin/users/:id` create, list, fetch,
+update, and hard-delete `local_users` rows. Every one of these endpoints is
+reachable **regardless of `LOCAL_LOGIN`'s value** — this surface is not
+gated by that switch, so an operator can provision/curate local user records
+whether or not local-login mode is currently active. Each request must carry
+`Authorization: Bearer <LOCAL_USER_ADMIN_TOKEN>`, checked with
+`crypto.timingSafeEqual` (never `===`), the same constant-time-comparison
+helper `POST /admin/emergency-rotate-keys` uses; a missing, malformed, or
+incorrect header always returns a generic `401 {"error":"Unauthorized"}` that
+never distinguishes which check failed, and a valid `bt_session` cookie alone
+never substitutes for this token. All admin responses include
+`Cache-Control: no-store`.
+
+`POST /admin/users` accepts `{"username": string, "email": string,
+"password": string, "actedBy"?: string}` and returns `201` with the created
+user's public fields (`id`, `username`, `email`, `isActive`, `createdAt`,
+`updatedAt` — never a password hash or hashing parameter). `username` is
+normalized to lowercase and validated as 3-64 characters of lowercase
+letters, digits, `.`, `-`, or `_`; `password` must be at least 12 characters
+(hashed via the same `src/password.ts` `hashPassword` the local-login path
+verifies against); a duplicate `username` or `email` returns `409` naming
+which field collided. `GET /admin/users` returns `200 {"users": [...]}` (no
+pagination); `GET /admin/users/:id` returns the same shape for one user or
+`404 {"error":"No such user."}`. `PATCH /admin/users/:id` updates `email`,
+`password`, and/or `isActive` (at least one required); a password change
+resets `failed_login_attempts`/`locked_until`. **Username is not renamable
+via `PATCH`** — a `username` field in the request body is rejected `400`;
+delete and recreate the user instead. An `email` collision returns `409`; an
+unknown `id` returns `404`. `DELETE /admin/users/:id` hard-deletes the row
+and returns `200 {"status":"deleted","id":string,"username":string}`, or
+`404` if the id doesn't exist; existing `local_login_audit`/
+`local_user_admin_audit` rows referencing that user are never deleted.
+Because the caller already holds `LOCAL_USER_ADMIN_TOKEN`, error messages on
+this surface are specific (e.g. naming which field is invalid or which value
+conflicted) — unlike the enumeration-resistant, merged responses on the
+public `/auth/local-login` surface.
+
+Every `create`/`update`/`delete` action (success or failure) and every
+admin-API authentication failure writes exactly one row to
+`local_user_admin_audit` (`action`, `target_user_id`, `target_username`,
+`changed_fields`, `result`, `failure_reason`, `actor_label`, `source_ip`),
+best-effort — a database failure never blocks the caller's response, falling
+back to a server-side log-line backstop instead. A successful read (`GET
+/admin/users`, `GET /admin/users/:id`) is not itself audited (only an
+authentication failure on those endpoints is), since CONTRACT-005 §6 and the
+audit table's `action` values (`create`/`update`/`delete`/`auth_failure`)
+scope the audit trail to write actions and auth failures, not reads.
+`actedBy`, when supplied on `POST`/`PATCH`, is stored verbatim as
+`actor_label`/`created_by` — an unverified, operator-self-asserted label,
+the same caveat CONTRACT-003 already accepts for `triggeredBy`.
 
 After configuring `.env` and building, bootstrap a fresh database with the
 normative command `node scripts/seed.js`. The launcher starts the compiled

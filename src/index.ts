@@ -7,7 +7,13 @@ import { exportJWK, importSPKI } from "jose";
 import { loadConfig, type Config } from "./config.js";
 import { openDatabase, prepareDataDirectory, type DatabaseHandle } from "./database.js";
 import { createIpThrottle, type IpThrottle } from "./ipThrottle.js";
-import { createLocalUserStore, type LocalUserStore } from "./localUsers.js";
+import {
+  createLocalUserStore,
+  EmailConflictError,
+  UsernameConflictError,
+  type AdminAuditInput,
+  type LocalUserStore,
+} from "./localUsers.js";
 import {
   computeCodeChallenge,
   createHandshakeStore,
@@ -22,7 +28,7 @@ import {
   validateIdToken,
   type EntraDiscoveryDocument,
 } from "./oidc.js";
-import { deriveDummyHashForTimingParity, verifyPassword } from "./password.js";
+import { deriveDummyHashForTimingParity, hashPassword, verifyPassword } from "./password.js";
 import { createSecretsStore, type SecretsStore } from "./secrets.js";
 import { mintSessionToken, nextLocalMidnightEpochSeconds } from "./tokens.js";
 
@@ -70,6 +76,108 @@ const LOCAL_LOGIN_GENERIC_SERVER_ERROR_MESSAGE =
 const LOCAL_LOGIN_RESPONSE_HEADERS: Record<string, string> = {
   "Content-Type": "application/json",
 };
+
+// CONTRACT-005 §4/Interfaces: admin CRUD API for /admin/users*. Same
+// defensive body-size-cap posture as EMERGENCY_ROTATION_BODY_LIMIT_BYTES/
+// LOCAL_LOGIN_BODY_LIMIT_BYTES above (not contract-specified).
+const ADMIN_USERS_BODY_LIMIT_BYTES = 16_384;
+// CONTRACT-005 Interfaces: "All admin responses include Cache-Control:
+// no-store" — same posture as CONTRACT-003's endpoint.
+const ADMIN_USERS_RESPONSE_HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  "Cache-Control": "no-store",
+};
+const ADMIN_UNAUTHORIZED_MESSAGE = "Unauthorized";
+const ADMIN_NOT_FOUND_MESSAGE = "No such user.";
+const ADMIN_GENERIC_SERVER_ERROR_MESSAGE = "Unable to complete the request.";
+
+// CONTRACT-005 "Resolved decisions" #4: username 3-64 chars, lowercase
+// ASCII letters/digits/'.'/'-'/'_' (application-validated, not DB-enforced).
+const USERNAME_REGEX = /^[a-z0-9._-]{3,64}$/;
+// CONTRACT-005 "Resolved decisions" #4: minimum password length 12
+// characters, no additional complexity rule.
+const ADMIN_MIN_PASSWORD_LENGTH = 12;
+// Email format is not prescribed further by CONTRACT-005 beyond "identity
+// fields satisfying CONTRACT-001's claim shape" — a loose, permissive
+// shape check (must contain "@" and a "."), not a full RFC 5322 validator,
+// plus a defensive length cap. Implementation judgment call, flagged in the
+// handoff, same posture as CONTRACT-005 not otherwise constraining email
+// syntax.
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ADMIN_EMAIL_MAX_LENGTH = 254;
+
+type HandlerResult = { status: number; headers: Record<string, string>; body: string };
+
+function adminUnauthorized(): HandlerResult {
+  return {
+    status: 401,
+    headers: ADMIN_USERS_RESPONSE_HEADERS,
+    body: JSON.stringify({ error: ADMIN_UNAUTHORIZED_MESSAGE }),
+  };
+}
+
+function adminNotFound(): HandlerResult {
+  return {
+    status: 404,
+    headers: ADMIN_USERS_RESPONSE_HEADERS,
+    body: JSON.stringify({ error: ADMIN_NOT_FOUND_MESSAGE }),
+  };
+}
+
+function adminBadRequest(message: string): HandlerResult {
+  return { status: 400, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify({ error: message }) };
+}
+
+function adminServerError(): HandlerResult {
+  return {
+    status: 500,
+    headers: ADMIN_USERS_RESPONSE_HEADERS,
+    body: JSON.stringify({ error: ADMIN_GENERIC_SERVER_ERROR_MESSAGE }),
+  };
+}
+
+type FieldValidation<T> = { value: T } | { error: string };
+
+function validateAdminUsername(raw: unknown): FieldValidation<string> {
+  if (typeof raw !== "string") return { error: "username is required and must be a string" };
+  const normalized = raw.trim().toLowerCase();
+  if (!USERNAME_REGEX.test(normalized)) {
+    return {
+      error:
+        "username must be 3-64 characters, using only lowercase letters, digits, '.', '-', or '_'",
+    };
+  }
+  return { value: normalized };
+}
+
+function validateAdminEmail(raw: unknown): FieldValidation<string> {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { error: "email is required and must be a non-empty string" };
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length > ADMIN_EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(trimmed)) {
+    return { error: "email must be a valid email address" };
+  }
+  return { value: trimmed };
+}
+
+function validateAdminPassword(raw: unknown): FieldValidation<string> {
+  if (typeof raw !== "string") return { error: "password is required and must be a string" };
+  if (raw.length < ADMIN_MIN_PASSWORD_LENGTH) {
+    return { error: `password must be at least ${ADMIN_MIN_PASSWORD_LENGTH} characters` };
+  }
+  return { value: raw };
+}
+
+// CONTRACT-005 Interfaces: actedBy is an operator-self-asserted, unverified
+// label carried into the audit row only — same caveat CONTRACT-003 already
+// accepts for triggeredBy. A missing/non-string/empty value is simply null,
+// never a request failure.
+function extractActedBy(parsedBody: unknown): string | null {
+  if (typeof parsedBody !== "object" || parsedBody === null) return null;
+  const actedBy = (parsedBody as Record<string, unknown>).actedBy;
+  return typeof actedBy === "string" && actedBy.trim() !== "" ? actedBy : null;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -630,6 +738,372 @@ export function createRequestHandler(
     }
   }
 
+  // CONTRACT-005 §4: same bearer-check pattern as
+  // handleEmergencyRotateKeys/constantTimeTokenMatches above, gated on
+  // LOCAL_USER_ADMIN_TOKEN instead of EMERGENCY_ROTATION_TOKEN. Checked
+  // first, with no request-body I/O required, so an unauthenticated caller
+  // never causes the service to buffer/parse a body it can't yet be
+  // trusted to have sent legitimately — the auth decision needs no read()
+  // at all, unlike CONTRACT-003's endpoint (which reads the body first
+  // purely to attribute triggeredBy on an auth failure too, since the body
+  // there is small and read()-then-check-auth costs nothing observable). For
+  // POST/PATCH admin requests below we still read the body before this
+  // check specifically to recover actedBy for the auth_failure audit row —
+  // mirroring CONTRACT-003's own choice there — but the check itself does
+  // not require it.
+  function checkAdminBearerAuth(request: IncomingMessage): boolean {
+    const token = extractBearerToken(request.headers.authorization);
+    return token !== null && constantTimeTokenMatches(token, config.localUserAdminToken);
+  }
+
+  async function writeAdminAuditBestEffort(input: AdminAuditInput): Promise<void> {
+    try {
+      await localUserStore.writeAdminAudit(input);
+    } catch (error) {
+      // CONTRACT-005 §6: never block the caller's response on this write;
+      // fall back to a server-side log-line backstop naming only a
+      // timestamp, action, and result/failure category — never a
+      // credential, password, or actor-label value.
+      console.error(
+        `local_user_admin_audit write failed; log-line backstop: timestamp=${new Date().toISOString()} action=${input.action} result=${input.result} failureReason=${input.failureReason ?? "null"}: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  // Reads and best-effort JSON-parses a POST/PATCH admin request body,
+  // returning [parsedBodyOrUndefined, actedBy]. `undefined` distinguishes
+  // "unreadable/malformed JSON" from a legitimate `null`/non-object body,
+  // both of which are validation errors, so the caller can produce a 400
+  // without ever throwing out of this function.
+  async function readAdminRequestBody(
+    request: IncomingMessage,
+  ): Promise<{ parsed: unknown; actedBy: string | null }> {
+    let bodyText = "";
+    try {
+      bodyText = (await readRequestBody(request, ADMIN_USERS_BODY_LIMIT_BYTES)).toString("utf8");
+    } catch (error) {
+      console.error(`Admin request body could not be read: ${errorMessage(error)}`);
+      return { parsed: undefined, actedBy: null };
+    }
+    if (bodyText.trim() === "") return { parsed: undefined, actedBy: null };
+    try {
+      const parsed: unknown = JSON.parse(bodyText);
+      return { parsed, actedBy: extractActedBy(parsed) };
+    } catch {
+      return { parsed: undefined, actedBy: null };
+    }
+  }
+
+  async function handleAdminCreateUser(request: IncomingMessage): Promise<HandlerResult> {
+    const sourceIp = extractSourceIp(request);
+    const { parsed, actedBy } = await readAdminRequestBody(request);
+
+    if (!checkAdminBearerAuth(request)) {
+      await writeAdminAuditBestEffort({
+        action: "auth_failure",
+        targetUserId: null,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "bad_credential",
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return adminUnauthorized();
+    }
+
+    if (typeof parsed !== "object" || parsed === null) {
+      return adminBadRequest("Request body must be a JSON object.");
+    }
+    const body = parsed as Record<string, unknown>;
+
+    const usernameResult = validateAdminUsername(body.username);
+    if ("error" in usernameResult) return adminBadRequest(usernameResult.error);
+    const emailResult = validateAdminEmail(body.email);
+    if ("error" in emailResult) return adminBadRequest(emailResult.error);
+    const passwordResult = validateAdminPassword(body.password);
+    if ("error" in passwordResult) return adminBadRequest(passwordResult.error);
+
+    try {
+      const passwordHash = await hashPassword(passwordResult.value);
+      const created = await localUserStore.createUser({
+        username: usernameResult.value,
+        email: emailResult.value,
+        passwordHash,
+        createdBy: actedBy,
+      });
+      await writeAdminAuditBestEffort({
+        action: "create",
+        targetUserId: created.id,
+        targetUsername: created.username,
+        changedFields: null,
+        result: "success",
+        failureReason: null,
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return { status: 201, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify(created) };
+    } catch (error) {
+      if (error instanceof UsernameConflictError || error instanceof EmailConflictError) {
+        await writeAdminAuditBestEffort({
+          action: "create",
+          targetUserId: null,
+          targetUsername: usernameResult.value,
+          changedFields: null,
+          result: "failure",
+          failureReason: "conflict",
+          actorLabel: actedBy,
+          sourceIp,
+        });
+        return { status: 409, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify({ error: error.message }) };
+      }
+      console.error(`Admin create-user failed unexpectedly: ${errorMessage(error)}`);
+      await writeAdminAuditBestEffort({
+        action: "create",
+        targetUserId: null,
+        targetUsername: usernameResult.value,
+        changedFields: null,
+        result: "failure",
+        failureReason: "database_error",
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return adminServerError();
+    }
+  }
+
+  async function handleAdminListUsers(request: IncomingMessage): Promise<HandlerResult> {
+    if (!checkAdminBearerAuth(request)) {
+      await writeAdminAuditBestEffort({
+        action: "auth_failure",
+        targetUserId: null,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "bad_credential",
+        actorLabel: null,
+        sourceIp: extractSourceIp(request),
+      });
+      return adminUnauthorized();
+    }
+    try {
+      const users = await localUserStore.listUsers();
+      // CONTRACT-005 §6/schema: reads are not part of the audited action
+      // set (create/update/delete/auth_failure only) — no audit row here.
+      return { status: 200, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify({ users }) };
+    } catch (error) {
+      console.error(`Admin list-users failed unexpectedly: ${errorMessage(error)}`);
+      return adminServerError();
+    }
+  }
+
+  async function handleAdminGetUser(request: IncomingMessage, targetId: string): Promise<HandlerResult> {
+    if (!checkAdminBearerAuth(request)) {
+      await writeAdminAuditBestEffort({
+        action: "auth_failure",
+        targetUserId: null,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "bad_credential",
+        actorLabel: null,
+        sourceIp: extractSourceIp(request),
+      });
+      return adminUnauthorized();
+    }
+    try {
+      const record = await localUserStore.getUserById(targetId);
+      if (record === undefined) return adminNotFound(); // read action — no audit row, see handleAdminListUsers.
+      return { status: 200, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify(record) };
+    } catch (error) {
+      console.error(`Admin get-user failed unexpectedly: ${errorMessage(error)}`);
+      return adminServerError();
+    }
+  }
+
+  async function handleAdminPatchUser(request: IncomingMessage, targetId: string): Promise<HandlerResult> {
+    const sourceIp = extractSourceIp(request);
+    const { parsed, actedBy } = await readAdminRequestBody(request);
+
+    if (!checkAdminBearerAuth(request)) {
+      await writeAdminAuditBestEffort({
+        action: "auth_failure",
+        targetUserId: null,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "bad_credential",
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return adminUnauthorized();
+    }
+
+    if (typeof parsed !== "object" || parsed === null) {
+      return adminBadRequest("Request body must be a JSON object.");
+    }
+    const body = parsed as Record<string, unknown>;
+
+    // CONTRACT-005 Interfaces: "Username is not renamable via this
+    // endpoint" — treated as a validation error if the caller attempts it,
+    // rather than silently ignoring the field (an implementer's call; the
+    // contract doesn't specify the precise response, only that a rename
+    // never happens).
+    if ("username" in body) {
+      return adminBadRequest("username cannot be changed via this endpoint; delete and recreate the user instead.");
+    }
+
+    const hasEmail = "email" in body;
+    const hasPassword = "password" in body;
+    const hasIsActive = "isActive" in body;
+    if (!hasEmail && !hasPassword && !hasIsActive) {
+      return adminBadRequest("At least one of email, password, or isActive is required.");
+    }
+
+    let emailValue: string | undefined;
+    if (hasEmail) {
+      const emailResult = validateAdminEmail(body.email);
+      if ("error" in emailResult) return adminBadRequest(emailResult.error);
+      emailValue = emailResult.value;
+    }
+
+    let passwordValue: string | undefined;
+    if (hasPassword) {
+      const passwordResult = validateAdminPassword(body.password);
+      if ("error" in passwordResult) return adminBadRequest(passwordResult.error);
+      passwordValue = passwordResult.value;
+    }
+
+    let isActiveValue: boolean | undefined;
+    if (hasIsActive) {
+      if (typeof body.isActive !== "boolean") return adminBadRequest("isActive must be a boolean.");
+      isActiveValue = body.isActive;
+    }
+
+    try {
+      const passwordHash = passwordValue !== undefined ? await hashPassword(passwordValue) : undefined;
+      const updateResult = await localUserStore.updateUser(targetId, {
+        email: emailValue,
+        passwordHash,
+        isActive: isActiveValue,
+      });
+      if (updateResult === undefined) {
+        await writeAdminAuditBestEffort({
+          action: "update",
+          targetUserId: targetId,
+          targetUsername: null,
+          changedFields: null,
+          result: "failure",
+          failureReason: "not_found",
+          actorLabel: actedBy,
+          sourceIp,
+        });
+        return adminNotFound();
+      }
+      await writeAdminAuditBestEffort({
+        action: "update",
+        targetUserId: updateResult.record.id,
+        targetUsername: updateResult.record.username,
+        changedFields: updateResult.changedFields.join(","),
+        result: "success",
+        failureReason: null,
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return { status: 200, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify(updateResult.record) };
+    } catch (error) {
+      if (error instanceof EmailConflictError) {
+        await writeAdminAuditBestEffort({
+          action: "update",
+          targetUserId: targetId,
+          targetUsername: null,
+          changedFields: null,
+          result: "failure",
+          failureReason: "conflict",
+          actorLabel: actedBy,
+          sourceIp,
+        });
+        return { status: 409, headers: ADMIN_USERS_RESPONSE_HEADERS, body: JSON.stringify({ error: error.message }) };
+      }
+      console.error(`Admin update-user failed unexpectedly: ${errorMessage(error)}`);
+      await writeAdminAuditBestEffort({
+        action: "update",
+        targetUserId: targetId,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "database_error",
+        actorLabel: actedBy,
+        sourceIp,
+      });
+      return adminServerError();
+    }
+  }
+
+  async function handleAdminDeleteUser(request: IncomingMessage, targetId: string): Promise<HandlerResult> {
+    const sourceIp = extractSourceIp(request);
+    // CONTRACT-005 Interfaces documents no request body for DELETE, so
+    // (unlike POST/PATCH above) no body is read here — actedBy is always
+    // null for this endpoint's audit rows.
+    if (!checkAdminBearerAuth(request)) {
+      await writeAdminAuditBestEffort({
+        action: "auth_failure",
+        targetUserId: null,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "bad_credential",
+        actorLabel: null,
+        sourceIp,
+      });
+      return adminUnauthorized();
+    }
+    try {
+      const deleted = await localUserStore.deleteUser(targetId);
+      if (deleted === undefined) {
+        await writeAdminAuditBestEffort({
+          action: "delete",
+          targetUserId: targetId,
+          targetUsername: null,
+          changedFields: null,
+          result: "failure",
+          failureReason: "not_found",
+          actorLabel: null,
+          sourceIp,
+        });
+        return adminNotFound();
+      }
+      await writeAdminAuditBestEffort({
+        action: "delete",
+        targetUserId: deleted.id,
+        targetUsername: deleted.username,
+        changedFields: null,
+        result: "success",
+        failureReason: null,
+        actorLabel: null,
+        sourceIp,
+      });
+      return {
+        status: 200,
+        headers: ADMIN_USERS_RESPONSE_HEADERS,
+        body: JSON.stringify({ status: "deleted", id: deleted.id, username: deleted.username }),
+      };
+    } catch (error) {
+      console.error(`Admin delete-user failed unexpectedly: ${errorMessage(error)}`);
+      await writeAdminAuditBestEffort({
+        action: "delete",
+        targetUserId: targetId,
+        targetUsername: null,
+        changedFields: null,
+        result: "failure",
+        failureReason: "database_error",
+        actorLabel: null,
+        sourceIp,
+      });
+      return adminServerError();
+    }
+  }
+
   return async (request, response) => {
     if (config.localLogin === false && request.method === "GET" && request.url === "/auth/login") {
       const result = await handleLogin();
@@ -697,6 +1171,46 @@ export function createRequestHandler(
       response.writeHead(result.status, result.headers);
       response.end(result.body);
       return;
+    }
+
+    // CONTRACT-005 §4/§7: /admin/users* is reachable regardless of
+    // LOCAL_LOGIN's value (not gated by that switch), subject only to its
+    // own LOCAL_USER_ADMIN_TOKEN check — deliberately placed outside (and
+    // before) the LOCAL_LOGIN-gated block below.
+    {
+      const adminUsersPath = (request.url ?? "").split("?")[0];
+      const adminUserIdMatch = /^\/admin\/users\/([^/]+)$/.exec(adminUsersPath ?? "");
+
+      if (request.method === "POST" && adminUsersPath === "/admin/users") {
+        const result = await handleAdminCreateUser(request);
+        response.writeHead(result.status, result.headers);
+        response.end(result.body);
+        return;
+      }
+      if (request.method === "GET" && adminUsersPath === "/admin/users") {
+        const result = await handleAdminListUsers(request);
+        response.writeHead(result.status, result.headers);
+        response.end(result.body);
+        return;
+      }
+      if (request.method === "GET" && adminUserIdMatch !== null) {
+        const result = await handleAdminGetUser(request, decodeURIComponent(adminUserIdMatch[1]!));
+        response.writeHead(result.status, result.headers);
+        response.end(result.body);
+        return;
+      }
+      if (request.method === "PATCH" && adminUserIdMatch !== null) {
+        const result = await handleAdminPatchUser(request, decodeURIComponent(adminUserIdMatch[1]!));
+        response.writeHead(result.status, result.headers);
+        response.end(result.body);
+        return;
+      }
+      if (request.method === "DELETE" && adminUserIdMatch !== null) {
+        const result = await handleAdminDeleteUser(request, decodeURIComponent(adminUserIdMatch[1]!));
+        response.writeHead(result.status, result.headers);
+        response.end(result.body);
+        return;
+      }
     }
 
     // CONTRACT-005 §7: strict either/or with GET /auth/login and GET

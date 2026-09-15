@@ -331,3 +331,37 @@ TASK-007's own handoff already recorded as its residual gap.
 - Everything else in this report is a Pass with supporting evidence and
   does not require a human decision to proceed, beyond the standard human
   acceptance step itself.
+
+## Addendum (2026-09-15): F1 resolved by process decision, not code change
+
+Patrick decided this is a broader question than a one-off amend-or-adapt
+choice: this project had no policy at all for how an approved contract is
+changed. Rather than resolve F1 in isolation, he established a general rule
+— **[ADR-001](../decisions/ADR-001-contracts-are-retired-by-supersession.md):
+once approved, a contract's body is never edited again; a required change
+is a new contract that supersedes it** — and applied it as F1's resolution:
+
+- CONTRACT-002 is retired in full (`Status: Retired`, `Superseded by:
+  CONTRACT-004`); its body is preserved unmodified as the historical record
+  of what TASK-005/006/008 were actually built against.
+- [CONTRACT-004](../contracts/CONTRACT-004-encrypted-secret-and-key-storage.md)
+  supersedes it wholly, carrying every unaffected section forward verbatim
+  and codifying TASK-009's as-built `rotateSigningKeyEmergency`/
+  `recordEmergencyRotationFailure` interface as normative — Patrick's
+  explicit choice over reworking already-implemented, already-verified code
+  to match CONTRACT-002's original, never-implemented
+  `rotateSigningKey`/`revokeKey` shape.
+- **No code change resulted.** `src/secrets.ts` is unchanged from what this
+  review already verified; TASK-009's own handoff and task-file header were
+  updated to reference CONTRACT-003/CONTRACT-004 instead of the now-retired
+  CONTRACT-002.
+- Future routine (non-emergency, overlap-window) rotation — which
+  CONTRACT-002 anticipated but which was never implemented — has no
+  interface in CONTRACT-004 either; it is explicitly left as an open
+  question for a future contract, rather than carrying forward an
+  unimplemented, unvalidated shape.
+
+This addendum records the resolution; it does not re-run or supersede the
+verification work above. As of this addendum, CONTRACT-004 is
+`Status: Proposed`, pending Patrick's formal approval alongside the rest of
+this milestone's acceptance.

@@ -1,20 +1,23 @@
-# CONTRACT-002: Encrypted secret & key storage in PGlite
+# CONTRACT-004: Encrypted secret & key storage in PGlite
 
-Status: Retired
-Superseded by: CONTRACT-004 (see ADR-001 for why: TASK-011's review, Finding
-F1, found TASK-009 did not implement this contract's `rotateSigningKey`/
-`revokeKey` interface as literally specified; Patrick decided, 2026-09-15,
-to retire this contract wholly and codify the as-built interface in a
-successor rather than edit this document or rework already-verified code.
-This document's body below is preserved unmodified as the historical record
-of what TASK-005/006/008 were actually built against.)
-Approved by: Patrick Moon
-Approved date: 2026-09-14
-Related tasks: TASK-003 (produced this contract), TASK-005 (schema/migrations
-implementation), TASK-006 (bootstrap/seed implementation), TASK-008 (key
-loading/JWKS implementation), TASK-009 (emergency key-rotation trigger,
-consumes the rotation interface defined here), TASK-002/CONTRACT-001 (OIDC
-login flow, consumes `CLIENT_SECRET` and signing-key retrieval defined here).
+Status: Proposed
+Approved by:
+Approved date:
+Related tasks: TASK-005 (schema/migrations implementation, unaffected —
+implemented against CONTRACT-002, behavior unchanged), TASK-006
+(bootstrap/seed implementation, unaffected), TASK-008 (key loading/JWKS
+implementation, unaffected), TASK-009 (emergency key-rotation trigger — this
+contract codifies its as-built interface as normative), TASK-011 (milestone
+review, Finding F1, prompted this supersession), CONTRACT-001 (OIDC login
+flow, consumes `getSecret`/`getCurrentSigningKey` defined here, unaffected),
+CONTRACT-003 (emergency-rotation authorization/audit — its
+`emergency_rotation_audit` table is the audit row this contract's
+`rotateSigningKeyEmergency` writes atomically; see Interfaces).
+Related ADRs: ADR-001 (contracts are retired by supersession, never amended
+in place — this document is that decision's first applied instance).
+Supersedes: CONTRACT-002 (retired in full; see CONTRACT-002's own header and
+ADR-001 for why).
+Superseded by:
 
 ## Purpose
 
@@ -25,7 +28,7 @@ in PGlite: the envelope-encryption scheme, the schema, the one-time
 bootstrap/seed interface, the operational preconditions (data-directory
 permissions, single-process constraint), and the key-lifecycle model that
 supports both emergency rotation (TASK-009) and future routine rotation with
-an overlap window, without a schema redesign.
+an overlap window.
 
 This contract treats TASK-003's Context section as settled and does not
 relitigate it: all secret/key material lives in PGlite (not `.env`),
@@ -33,6 +36,16 @@ protected by envelope encryption with a key-encrypting key (`DB_ENCRYPTION_KEY`)
 that lives only in `.env`; the data directory is additionally hardened via
 OS permissions; the service is single-process; and signing keys are tracked
 by `kid` and status to allow more than one simultaneously valid key.
+
+**Relationship to CONTRACT-002:** this contract supersedes CONTRACT-002 in
+full (ADR-001). Every section below is identical to CONTRACT-002 except
+"Key lifecycle" (§3), "Interfaces," the rotation-related "Validation
+requirements" bullet, and "Resolved decisions" #13, which are rewritten to
+match TASK-009's actual, independently-verified implementation rather than
+CONTRACT-002's originally-specified (and never-implemented)
+`rotateSigningKey`/`revokeKey` shape. TASK-005, TASK-006, and TASK-008's
+implementations are unaffected — nothing in the sections they were built
+against changed.
 
 ## Scope
 
@@ -50,9 +63,9 @@ by `kid` and status to allow more than one simultaneously valid key.
   preconditions/invariants.
 - The single-process constraint, stated as an explicit
   precondition/invariant.
-- The key-lifecycle model (statuses/fields) supporting both emergency
-  rotation (drop old key immediately) and future routine rotation (overlap
-  window) without a schema redesign.
+- The key-lifecycle model (statuses/fields) supporting emergency rotation
+  (drop old key immediately, atomically coupled to its audit record) as
+  actually built by TASK-009.
 - The module-boundary interface (function-level shape) that CONTRACT-001,
   TASK-008, and TASK-009 build against.
 
@@ -63,13 +76,19 @@ by `kid` and status to allow more than one simultaneously valid key.
   territory; this contract only defines how those values are stored and
   retrieved).
 - TASK-009's own authorization/audit design for *who* may trigger emergency
-  rotation and how that trigger is audited. This contract only guarantees
-  the storage interface supports what TASK-009 needs: a way to mark a key
-  superseded/revoked and insert a new one, atomically.
-- Rotating `DB_ENCRYPTION_KEY` itself (the key-encrypting key) — see Open
-  questions.
-- Backup/restore strategy for the PGlite data directory — see Open
-  questions.
+  rotation and how that trigger is audited, and the shape of the
+  `emergency_rotation_audit` table itself (CONTRACT-003's territory). This
+  contract only guarantees that its own storage-layer function atomically
+  couples a key rotation to one row insert in that externally-defined
+  table — see Interfaces.
+- Future routine (non-emergency, overlap-window) key rotation's interface —
+  see Open questions. The schema still supports it (the `retired` status
+  and `retired_at` column are unused but present); no function interface
+  for it is specified by this contract.
+- Rotating `DB_ENCRYPTION_KEY` itself (the key-encrypting key) — see
+  Resolved decisions #14.
+- Backup/restore strategy for the PGlite data directory — see Resolved
+  decisions #15.
 - Deployment mechanics for the dedicated service OS user (creation,
   systemd unit configuration) — this contract states the permission
   *requirement*, not how an operator provisions the user.
@@ -87,9 +106,10 @@ by `kid` and status to allow more than one simultaneously valid key.
 - **TASK-008 JWKS endpoint** (indirect consumer) — retrieves all
   publishable (non-revoked) public key material.
 - **TASK-009 emergency rotation trigger** (indirect consumer) — invokes this
-  contract's rotation interface to atomically insert a new current key and
-  revoke the previous one; owns its own authorization/audit design on top of
-  this interface.
+  contract's `rotateSigningKeyEmergency` to atomically insert a new current
+  key, revoke the previous one, and write its own success audit row; owns
+  its own authorization/audit design (CONTRACT-003) on top of this
+  interface.
 - **`DB_ENCRYPTION_KEY`** (environment input, not a running actor) — the
   key-encrypting key, sourced from `.env` only, and never written to PGlite
   or any other durable store this contract controls.
@@ -109,8 +129,9 @@ by `kid` and status to allow more than one simultaneously valid key.
 - At bootstrap only: a generated RS256 key pair (generated in-process by the
   seed script; the plaintext private key never originates outside the
   process that immediately encrypts it).
-- At rotation time (TASK-009, future routine rotation): a newly generated
-  RS256 key pair, supplied to this contract's rotation interface.
+- At emergency-rotation time (TASK-009): a newly generated RS256 key pair
+  and an audit context (`triggeredBy`, `sourceIp`), supplied to this
+  contract's `rotateSigningKeyEmergency`.
 
 **Outputs:**
 - Encrypted rows in PGlite: ciphertext, IV, and authentication tag for each
@@ -123,6 +144,9 @@ by `kid` and status to allow more than one simultaneously valid key.
 - A queryable set of "publishable" signing keys (public material only,
   `status IN ('current', 'retired')`) for TASK-008's JWKS endpoint to
   render.
+- One row written into CONTRACT-003's `emergency_rotation_audit` table per
+  successful `rotateSigningKeyEmergency` call, in the same transaction as
+  the key rotation itself (see Interfaces).
 
 ## Preconditions
 
@@ -145,12 +169,9 @@ by `kid` and status to allow more than one simultaneously valid key.
 - BTAuthOrchestrator runs as a single OS process against `PGLITE_DATA_DIR`.
   No clustering, no multi-worker process model, no second instance pointed
   at the same data directory — concurrently or sequentially without a clean
-  shutdown of the prior instance. TASK-005 is responsible for confirming
-  whether PGlite's own on-disk locking already enforces this (its plan says
-  as much); regardless of the enforcement mechanism, this contract requires
-  that a second process attempting to open an already-open data directory
-  fails fast and observably rather than corrupting data or silently
-  degrading.
+  shutdown of the prior instance. A second process attempting to open an
+  already-open data directory fails fast and observably rather than
+  corrupting data or silently degrading.
 - The bootstrap/seed process (TASK-006) has been run successfully at least
   once before CONTRACT-001's login flow is exercised — a database with zero
   rows in `secrets` or zero rows with `status = 'current'` in `signing_keys`
@@ -219,8 +240,8 @@ and any future similar values (e.g., a future non-Entra credential):
 | `private_key_iv` | bytea, not null | 12-byte IV. |
 | `private_key_auth_tag` | bytea, not null | 16-byte GCM authentication tag. |
 | `created_at` | timestamptz, not null, default now() | When this key was generated/inserted. |
-| `retired_at` | timestamptz, nullable | Set when this key transitions `current` → `retired` (satisfies TASK-003's "rotated" timestamp for the overlap-window path). |
-| `revoked_at` | timestamptz, nullable | Set when this key transitions to `revoked` (from `current` directly, or from `retired`). |
+| `retired_at` | timestamptz, nullable | Unused by any function this contract currently specifies (no routine-rotation interface exists yet — see Open questions); reserved for that future work. |
+| `revoked_at` | timestamptz, nullable | Set when this key transitions to `revoked` (from `current` directly via `rotateSigningKeyEmergency`). |
 
 **Invariant:** at all times after the bootstrap/seed process completes
 successfully, exactly one row in `signing_keys` has `status = 'current'` —
@@ -234,32 +255,28 @@ intentionally not prescribed here.
 
 ### 3. Key lifecycle
 
-Exactly three statuses, covering both rotation modes without a schema
-change:
+Exactly three statuses:
 
 - **`current`** — the one key actively used to sign new tokens. Published
   in JWKS.
 - **`retired`** — no longer used to sign new tokens, but still published in
-  JWKS so tokens already signed under it keep verifying. This is the
-  overlap-window state used by future routine rotation (not exercised by
-  this milestone, since TASK-009's emergency path skips it — see below —
-  but the schema supports it today).
+  JWKS so tokens already signed under it keep verifying. Reserved for
+  future routine rotation's overlap window; no function in this contract's
+  Interfaces currently produces this transition (see Open questions).
 - **`revoked`** — no longer published in JWKS at all. Any token signed
   under this key fails verification from the moment of revocation. Reached
-  either directly from `current` (TASK-009's emergency rotation: no overlap
-  window, immediate global invalidation) or from `retired` (future routine
-  rotation, once its overlap window has elapsed).
+  directly from `current` via `rotateSigningKeyEmergency` (TASK-009's
+  emergency rotation: no overlap window, immediate global invalidation).
 
-Transitions:
-- `current` → `retired` (routine rotation, future work)
-- `current` → `revoked` (emergency rotation, TASK-009)
-- `retired` → `revoked` (routine rotation's overlap-window expiry, future
-  work)
-- (new key) → `current` (bootstrap, or any rotation)
+Transitions specified by this contract:
+- `current` → `revoked` (emergency rotation, `rotateSigningKeyEmergency`)
+- (new key) → `current` (bootstrap, or emergency rotation)
 
-No other transition is valid (e.g. a `revoked` key is never reactivated;
-`retired` never reverts to `current`). A fresh signing key is always
-inserted directly with `status = 'current'`.
+No other transition is valid (e.g. a `revoked` key is never reactivated). A
+fresh signing key is always inserted directly with `status = 'current'`.
+The `current` → `retired` and `retired` → `revoked` transitions remain part
+of the schema's supported vocabulary but have no producing function in this
+contract — see Open questions.
 
 JWKS-publishable set (what TASK-008's endpoint must render, public material
 only): all rows with `status IN ('current', 'retired')`. `revoked` rows are
@@ -340,8 +357,8 @@ overwrites or duplicates an existing `CLIENT_SECRET` row or an existing
 `current` signing key; it either completes the missing piece(s) of a
 partial bootstrap or refuses entirely. This script is a first-run
 bootstrap tool only — it is never the mechanism for rotating `CLIENT_SECRET`
-or a signing key; rotation uses the interface in "Interfaces" below
-(TASK-009, and future routine rotation), not this script.
+or a signing key; rotation uses the interface in "Interfaces" below, not
+this script.
 
 ### 5. Data-directory permissions (enforced behavior, not just a fact)
 
@@ -378,6 +395,15 @@ violated.
   particular: not in `.env`, not in a log file, not in a leftover
   `--client-secret-file`, not in shell history).
 
+**Postconditions (true after a successful `rotateSigningKeyEmergency`
+call):**
+- Exactly one `signing_keys` row has `status = 'current'` (the newly
+  generated key); the immediately prior current key (if any) now has
+  `status = 'revoked'` and a populated `revoked_at`.
+- Exactly one new row exists in CONTRACT-003's `emergency_rotation_audit`
+  table with `result = 'success'`, naming the previous and new `kid`.
+- These two facts are never observed independently — see Invariants.
+
 **Invariants (always true while the service is running):**
 - `DB_ENCRYPTION_KEY` never appears inside PGlite or any file this contract
   writes.
@@ -396,6 +422,12 @@ violated.
   ciphertext, tampered IV, or a ciphertext/IV/tag set copied from a
   different row (wrong AAD) always fails (throws) rather than returning
   incorrect plaintext.
+- A committed key rotation performed by `rotateSigningKeyEmergency` and its
+  `result = 'success'` `emergency_rotation_audit` row are written inside
+  one database transaction and therefore always occur together — never a
+  rotation without its audit row, never an audit row without the rotation
+  it claims happened. This is the atomicity guarantee CONTRACT-003's Open
+  question #7 asked for; see Interfaces for how it's achieved.
 
 ## Failure behavior
 
@@ -409,15 +441,15 @@ violated.
 | Seed script's `--client-secret-file` cannot be deleted after being read | Abort before any PGlite write; instruct the operator to delete it manually; exit non-zero. |
 | Seed script interrupted mid-write (process killed between generating and storing a value) | No partially-written row is left in a state where it could be read as valid/current (see Postconditions and invariants — atomic per-row writes). A subsequent run detects the missing piece and completes it (see "Determining what needs seeding"). |
 | Attempted signing-key status transition other than the valid set in "Key lifecycle" | Reject (throw/error); no such transition is ever written. |
+| `rotateSigningKeyEmergency`'s transaction fails partway (e.g. database unreachable mid-write, after a bearer credential has already been authenticated by CONTRACT-003) | The whole transaction rolls back: no partial/new `signing_keys` row, no status change to the previous current key, no `emergency_rotation_audit` success row. The caller (CONTRACT-003's endpoint handler) is responsible for its own separate, best-effort `result = 'failure'` audit write and log-line backstop — this contract's own atomicity guarantee covers only the success path, by construction (a failed transaction commits nothing to couple). |
 
 ## Interfaces
 
 The following is the module-boundary interface this contract requires to
 exist (function names, parameters, and return semantics are normative;
 exact language-level types, the choice of ORM/query builder vs. raw SQL,
-and which task file (TASK-005 vs. TASK-008/009) physically implements each
-function are not prescribed — see TASK-005's own scope note that
-encrypt/decrypt helpers "may be implemented here or in TASK-008/009").
+and which task file physically implements each function are not
+prescribed).
 
 **Envelope encryption primitives:**
 ```
@@ -444,28 +476,7 @@ insertSigningKey(input: {
 }): Promise<void>
 // Inserts a new row with status = 'current'. Used by bootstrap when no
 // current key exists. Must reject (not silently succeed) if a current key
-// already exists — callers needing to replace a current key use
-// rotateSigningKey below, not this function.
-
-rotateSigningKey(input: {
-  newKid: string,
-  algorithm: string,
-  publicKeyPem: string,
-  privateKeyPem: string,
-  previousKeyDisposition: 'retire' | 'revoke',
-}): Promise<{ newKid: string, previousKid: string | null }>
-// Atomically: inserts the new key as 'current'; if a 'current' key already
-// exists, transitions it to 'retired' (previousKeyDisposition: 'retire' —
-// future routine rotation, overlap window) or directly to 'revoked'
-// (previousKeyDisposition: 'revoke' — TASK-009's emergency path, no
-// overlap). If no current key exists, behaves like insertSigningKey and
-// previousKid is null. This is the function TASK-009 calls with
-// previousKeyDisposition: 'revoke'.
-
-revokeKey(kid: string): Promise<void>
-// Transitions a 'retired' key to 'revoked'. Used by future routine
-// rotation once its overlap window elapses. Rejects if the key is not
-// currently 'retired'.
+// already exists.
 
 getCurrentSigningKey(): Promise<{ kid: string, algorithm: string, publicKeyPem: string, privateKeyPem: string }>
 // Throws if no row has status = 'current' (a critical/startup-class error
@@ -474,24 +485,51 @@ getCurrentSigningKey(): Promise<{ kid: string, algorithm: string, publicKeyPem: 
 listPublishableSigningKeys(): Promise<Array<{ kid: string, algorithm: string, publicKeyPem: string, status: 'current' | 'retired' }>>
 // Public material only. Never includes 'revoked' rows or any private key
 // field. This is what TASK-008's JWKS endpoint renders.
+
+rotateSigningKeyEmergency(
+  newKey: { kid: string, algorithm: string, publicKeyPem: string, privateKeyPem: string },
+  audit: { triggeredBy: string | null, sourceIp: string | null },
+): Promise<{ previousKid: string | null, newKid: string }>
+// Atomically, in one transaction: reads the current signing_keys row (if
+// any); if one exists, transitions it to status = 'revoked' with
+// revoked_at = now(); inserts newKey as the new status = 'current' row;
+// inserts one result = 'success' row into CONTRACT-003's
+// emergency_rotation_audit table naming previousKid/newKid and the given
+// audit context. If any step fails, the whole transaction rolls back —
+// see Failure behavior. This is the only function this contract specifies
+// for replacing an already-current key; there is no routine
+// (previousKeyDisposition: 'retire') mode — see Open questions.
+
+recordEmergencyRotationFailure(
+  input: { triggeredBy: string | null, sourceIp: string | null, failureReason: string },
+): Promise<void>
+// Inserts one result = 'failure' row into emergency_rotation_audit,
+// non-transactionally (there is no key rotation to couple it to
+// atomically on this path). The caller (CONTRACT-003's endpoint handler)
+// must treat this as best-effort: catch a rejection from this function
+// and fall back to a server-side log-line backstop rather than let it
+// fail the HTTP response it's auditing.
 ```
 
 **Interface to CONTRACT-001:** CONTRACT-001's login/token-minting flow
 depends on `getSecret('CLIENT_SECRET')` and `getCurrentSigningKey()`.
-CONTRACT-001 already documents this dependency as an opaque interface;
-this contract now gives it the concrete shape above.
+Unchanged from CONTRACT-002.
 
-**Interface to TASK-009:** the emergency rotation trigger calls
-`rotateSigningKey({ ..., previousKeyDisposition: 'revoke' })` after
-generating a new key pair itself (key generation is TASK-009's own
-responsibility, using the same 2048-bit RSA / PKCS8-PEM-in,
-AES-256-GCM-encrypted-at-rest shape bootstrap uses). This contract does not
-define who is authorized to call it or how that call is audited — that is
-TASK-009's own scope.
+**Interface to CONTRACT-003:** CONTRACT-003's `POST
+/admin/emergency-rotate-keys` handler, after authenticating the request,
+generates a new key pair itself (key generation is CONTRACT-003/TASK-009's
+own responsibility, using the same 2048-bit RSA / PKCS8-PEM-in,
+AES-256-GCM-encrypted-at-rest shape bootstrap uses) and calls
+`rotateSigningKeyEmergency`. On success it uses the returned
+`previousKid`/`newKid` to build its HTTP response. On failure, it calls
+`recordEmergencyRotationFailure`. This contract defines the schema and
+atomicity of `emergency_rotation_audit` writes made through these two
+functions; CONTRACT-003 defines that table's full column schema, who is
+authorized to reach this interface, and how the endpoint audits/responds.
 
-**No HTTP interface.** Unlike CONTRACT-001, this contract defines no
-network-facing endpoints of its own; it is an in-process module boundary
-plus the standalone bootstrap CLI script described above.
+**No HTTP interface.** Unlike CONTRACT-001 and CONTRACT-003, this contract
+defines no network-facing endpoints of its own; it is an in-process module
+boundary plus the standalone bootstrap CLI script described above.
 
 ## UX expectations
 
@@ -534,29 +572,46 @@ UI in this contract's scope:
   (`ls -ld`) — confirm `drwx------`, owned by the dedicated service user;
   confirm the process refuses to start if the directory is `chmod 755`d
   before startup.
-- Using `rotateSigningKey`, confirm: exactly one `current` row exists
-  before and after; the previous key correctly transitions to `retired`
-  (routine-rotation simulation) in one test and to `revoked` (emergency
-  simulation) in another; `listPublishableSigningKeys()` includes a
-  `retired` key but excludes a `revoked` key.
-- Confirm two simultaneously valid keys (`current` + `retired`) both appear
-  in `listPublishableSigningKeys()`, proving the overlap-window shape works
-  without any schema change — this is the concrete check TASK-008/TASK-009
-  and CONTRACT-001's JWKS validation requirement build on.
+- Using `rotateSigningKeyEmergency`, confirm: exactly one `current` row
+  exists before and after; the previous current key correctly transitions
+  to `revoked` with `revoked_at` populated; `listPublishableSigningKeys()`
+  excludes it afterward; exactly one `result = 'success'`
+  `emergency_rotation_audit` row is written naming the correct
+  previous/new `kid`.
+- Confirm the rotation-and-audit-row atomicity invariant directly: force a
+  failure after authentication but before/during the transaction (e.g. a
+  simulated database error) and confirm neither a partial `signing_keys`
+  change nor a `result = 'success'` audit row is left; confirm
+  `recordEmergencyRotationFailure` (or the log-line backstop, if the
+  database itself is unreachable) produces the failure-path audit record
+  instead.
+- Fire two authenticated `rotateSigningKeyEmergency`-triggering requests
+  concurrently and confirm they chain correctly (the second's
+  `previousKid` equals the first's `newKid`), exactly one final `current`
+  row results, and two `result = 'success'` audit rows are written.
 
 ## Open questions
 
-None outstanding. The three items raised while drafting this contract were
-resolved by Patrick (2026-09-14) as deliberate scope decisions, not
-architectural gaps — see "Resolved decisions" #14–16.
+Future routine (non-emergency) key rotation with an overlap window
+(`current` → `retired`, then `retired` → `revoked` once the window
+elapses) has no defined function interface in this contract. CONTRACT-002
+originally specified `rotateSigningKey(previousKeyDisposition: 'retire' |
+'revoke')` and a separate `revokeKey(kid)` to cover both the emergency and
+future routine cases with one shared interface; neither was ever
+implemented, and this contract drops that shape when superseding
+CONTRACT-002 rather than carry forward an unimplemented, unvalidated
+design. When routine rotation is actually taken up, it should get its own
+interface designed against real requirements at that time (as a new
+contract, or a further supersession of this one, per ADR-001) — not a
+resurrection of the dropped `rotateSigningKey`/`revokeKey` shape by
+default. The `retired` status and `retired_at` column remain in the schema
+specifically so that future work needs no migration to use them.
 
 ## Resolved decisions
 
 The following were judgment calls this contract made because TASK-003 did
-not settle them explicitly. Recorded here per this project's convention
-(see CONTRACT-001's own "Resolved decisions"); each awaits Patrick's review
-alongside the rest of this contract, since — unlike CONTRACT-001 at the
-time it was drafted — none of these has been separately confirmed yet.
+not settle them explicitly, carried forward unchanged from CONTRACT-002
+except where noted.
 
 1. **Single-layer envelope construction, not a two-layer per-value DEK.**
    TASK-003 calls `DB_ENCRYPTION_KEY` a "key-encrypting key" and says only
@@ -576,11 +631,9 @@ time it was drafted — none of these has been separately confirmed yet.
    `algorithm`, `status`, `public_key`, `private_key_ciphertext`,
    `private_key_iv`, `private_key_auth_tag`, `created_at`, `retired_at`,
    `revoked_at`). See Schema.
-4. **Status vocabulary** — exactly `'current'`, `'retired'`, `'revoked'`,
-   with the transition set in "Key lifecycle." Chosen as the minimal set
-   that lets emergency rotation skip straight to `revoked` while leaving
-   `retired` available, unused, for future routine rotation's overlap
-   window — satisfying TASK-003's "without a schema redesign" requirement.
+4. **Status vocabulary** — exactly `'current'`, `'retired'`, `'revoked'`.
+   `'retired'` currently has no producing function (see Open questions),
+   kept in the schema so future routine rotation needs no migration.
 5. **IV length (12 bytes) and auth-tag length (16 bytes)** — standard
    AES-GCM parameters, matching Node's `crypto` module defaults and NIST
    guidance for GCM interoperability/security. See "Envelope encryption
@@ -595,11 +648,9 @@ time it was drafted — none of these has been separately confirmed yet.
    since it is not secret). A DB-level attacker with write access could in
    principle substitute a public key without invalidating the corresponding
    encrypted private key. Accepted limitation, given the chmod-700 +
-   dedicated-user defense layer this contract already requires; flagged
-   rather than silently accepted. See "Envelope encryption scheme"
-   footnote intent and Open questions.
+   dedicated-user defense layer this contract already requires.
 8. **RSA key size** — 2048 bits, fixed (not configurable), for both
-   bootstrap and future rotation. Matches common library defaults
+   bootstrap and emergency rotation. Matches common library defaults
    (`jose`, PyJWT, php-jwt all support 2048-bit RS256 without extra
    configuration) and keeps JWKS/JWT size predictable across the mixed
    Node/Python/PHP consuming apps referenced in NOTES.md §4.
@@ -629,12 +680,25 @@ time it was drafted — none of these has been separately confirmed yet.
     "defense in depth" framing: a security control that can be silently
     bypassed by a misconfiguration is not a control BTAuthOrchestrator can
     rely on. See Failure behavior.
-13. **`insertSigningKey` vs. `rotateSigningKey` as two distinct functions**
-    rather than one combined function — `insertSigningKey` is bootstrap-only
-    (rejects if a current key already exists, preventing an accidental
-    second "current" row); `rotateSigningKey` is the only supported path to
-    replace an already-current key, atomically, and is what TASK-009 and
-    future routine rotation both build on. See Interfaces.
+13. **`rotateSigningKeyEmergency` and `recordEmergencyRotationFailure`, not
+    `rotateSigningKey`/`revokeKey`.** CONTRACT-002 originally specified a
+    single combined `rotateSigningKey` (accepting a
+    `previousKeyDisposition: 'retire' | 'revoke'`) plus a separate
+    `revokeKey`, intended to serve both TASK-009's emergency path and a
+    future routine-rotation path with one shared interface. TASK-009 also
+    needed its rotation and its own audit-trail row (CONTRACT-003) to
+    commit atomically — a requirement CONTRACT-002 had left as an
+    explicitly open question rather than resolve. TASK-009's implementer
+    built `rotateSigningKeyEmergency`/`recordEmergencyRotationFailure`
+    instead, solving the atomicity requirement directly; TASK-011's review
+    (Finding F1) confirmed the resulting behavior is correct but that this
+    left CONTRACT-002's literal interface unmet without the escalation its
+    own open question had asked for. Patrick decided (2026-09-15) to
+    supersede CONTRACT-002 with this contract, codifying the as-built,
+    already-implemented-and-verified interface as normative, rather than
+    rework working code to match a never-implemented signature. See
+    ADR-001 and Open questions (routine rotation's interface is
+    deliberately left undesigned here, not silently dropped).
 14. **`DB_ENCRYPTION_KEY` re-keying is explicitly out of scope, not an
     oversight.** Confirmed by Patrick. This contract defines no process for
     rotating the key-encrypting key itself; if it is ever changed without a

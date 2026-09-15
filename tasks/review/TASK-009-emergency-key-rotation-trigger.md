@@ -7,8 +7,15 @@ Proposed by: Jarvis
 Proposed date: 2026-08-11
 Approved by: Patrick Moon
 Approved date: 2026-08-11
-Related contracts: CONTRACT-002
-Related ADRs: none
+Related contracts: CONTRACT-003 (authorization/audit design this task
+implemented against); CONTRACT-002 (storage contract this task was
+originally scoped against — retired 2026-09-15, see CONTRACT-004, which
+codifies this task's as-built `rotateSigningKeyEmergency`/
+`recordEmergencyRotationFailure` interface as normative; no code change
+resulted from the retirement)
+Related ADRs: ADR-001 (contracts are retired by supersession — the policy
+under which CONTRACT-002 was retired in favor of CONTRACT-004 because of
+this task, see TASK-011 Finding F1)
 Dependencies: TASK-008
 
 ## Desired outcome

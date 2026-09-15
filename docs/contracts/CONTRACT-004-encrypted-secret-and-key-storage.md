@@ -1,8 +1,8 @@
 # CONTRACT-004: Encrypted secret & key storage in PGlite
 
-Status: Proposed
-Approved by:
-Approved date:
+Status: Accepted
+Approved by: Patrick
+Approved date: 2026-09-15
 Related tasks: TASK-005 (schema/migrations implementation, unaffected —
 implemented against CONTRACT-002, behavior unchanged), TASK-006
 (bootstrap/seed implementation, unaffected), TASK-008 (key loading/JWKS

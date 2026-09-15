@@ -1,8 +1,8 @@
 # CONTRACT-005: Local username/password login and user management
 
-Status: Proposed
-Approved by:
-Approved date:
+Status: Approved
+Approved by: Patrick
+Approved date: 2026-09-15
 Related tasks: None yet for a dedicated implementation task covering this
 contract as a whole. TASK-006 (CONTRACT-004's bootstrap/seed script) is
 referenced because Required behavior §5 extends its idempotent seeding

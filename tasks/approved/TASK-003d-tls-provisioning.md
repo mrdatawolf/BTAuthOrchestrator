@@ -116,6 +116,17 @@ configuration work should begin until the credential is available.
 Confirmed with Patrick on 2026-09-14 that it is not yet ready; task stays
 in `tasks/approved/` until it is.
 
+**Additionally deprioritized (2026-09-15):** Entra/Azure integration work
+is on hold while CONTRACT-005's local-login system (ADR-003) is built out
+and tested, so this task has no near-term urgency even once the Cloudflare
+credential is available — TLS matters for Entra's redirect-URI requirement
+(CONTRACT-001) and for CONTRACT-003's bearer-credential-over-the-wire
+requirement, neither of which is on the critical path while local-only
+testing is the priority. Per `docs/workflow/lifecycle.md` ("Blocked is a
+condition, not a lifecycle directory"), this task stays in `tasks/approved/`
+rather than moving to `proposed/` or `review/` — neither reflects its
+actual state (it's still approved; it's just not being worked right now).
+
 ## Implementation handoff
 
 Not started.

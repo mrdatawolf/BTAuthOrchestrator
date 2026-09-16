@@ -77,6 +77,82 @@ const LOCAL_LOGIN_RESPONSE_HEADERS: Record<string, string> = {
   "Content-Type": "application/json",
 };
 
+// CONTRACT-005 §11: the minimal HTML login form served at
+// GET /auth/local-login. This is a PURE client-side wrapper around the
+// existing POST /auth/local-login JSON endpoint above — every
+// credential-verification decision (unknown user / bad password / disabled /
+// locked / success) is made exclusively by handleLocalLogin via the fetch()
+// call below. There is no username/password comparison, no hashing, and no
+// server-side rendering of the outcome anywhere in this constant or its
+// route handler: the page's own inline <script> reads the JSON response
+// handleLocalLogin already produced and displays it verbatim. Deliberately
+// unstyled/minimal (no CSS framework, no branding, no responsive design) per
+// CONTRACT-005 §11 and NOTES.md's "no UI polish" posture.
+const LOCAL_LOGIN_FORM_RESPONSE_HEADERS: Record<string, string> = {
+  "Content-Type": "text/html; charset=utf-8",
+};
+const LOCAL_LOGIN_FORM_HTML = `<!doctype html>
+<html>
+<head><title>Local sign-in</title></head>
+<body>
+<h1>Local sign-in</h1>
+<form id="login-form">
+  <div>
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required>
+  </div>
+  <div>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+  </div>
+  <button type="submit">Sign in</button>
+</form>
+<p id="error-message"></p>
+<p id="success-message" hidden>You're signed in.</p>
+<script>
+(function () {
+  var form = document.getElementById("login-form");
+  var errorMessage = document.getElementById("error-message");
+  var successMessage = document.getElementById("success-message");
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    errorMessage.textContent = "";
+
+    var username = document.getElementById("username").value;
+    var password = document.getElementById("password").value;
+
+    fetch("/auth/local-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, password: password }),
+    })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          return { ok: response.ok, body: body };
+        });
+      })
+      .then(function (result) {
+        if (result.ok) {
+          form.hidden = true;
+          successMessage.hidden = false;
+        } else {
+          errorMessage.textContent =
+            result.body && typeof result.body.error === "string"
+              ? result.body.error
+              : "Sign-in failed.";
+        }
+      })
+      .catch(function () {
+        errorMessage.textContent = "Sign-in failed.";
+      });
+  });
+})();
+</script>
+</body>
+</html>
+`;
+
 // CONTRACT-005 §4/Interfaces: admin CRUD API for /admin/users*. Same
 // defensive body-size-cap posture as EMERGENCY_ROTATION_BODY_LIMIT_BYTES/
 // LOCAL_LOGIN_BODY_LIMIT_BYTES above (not contract-specified).
@@ -1216,12 +1292,21 @@ export function createRequestHandler(
     // CONTRACT-005 §7: strict either/or with GET /auth/login and GET
     // /auth/callback above — live only when LOCAL_LOGIN=true, otherwise
     // falls through to the same generic 404 below as any unmatched route.
-    // Note: GET /auth/local-login (the HTML form, §11) is deliberately not
-    // implemented here — TASK-018's scope, not this task's.
     if (config.localLogin === true && request.method === "POST" && (request.url ?? "").split("?")[0] === "/auth/local-login") {
       const result = await handleLocalLogin(request);
       response.writeHead(result.status, result.headers);
       response.end(result.body);
+      return;
+    }
+
+    // CONTRACT-005 §11: GET /auth/local-login — the minimal HTML login form,
+    // gated identically to the JSON endpoint immediately above (live only
+    // when LOCAL_LOGIN=true; otherwise falls through to the same generic 404
+    // as any unmatched route). Serves a fixed, self-contained HTML document;
+    // no request body is read and no credential is inspected here at all.
+    if (config.localLogin === true && request.method === "GET" && (request.url ?? "").split("?")[0] === "/auth/local-login") {
+      response.writeHead(200, LOCAL_LOGIN_FORM_RESPONSE_HEADERS);
+      response.end(LOCAL_LOGIN_FORM_HTML);
       return;
     }
 

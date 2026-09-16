@@ -91,9 +91,9 @@ entry, no token exchange executes). `LOCAL_LOGIN=false` is the reverse:
 exactly as CONTRACT-001 already specifies. `GET /.well-known/jwks.json`,
 `POST /admin/emergency-rotate-keys`, and the admin CRUD API (`/admin/users*`,
 see below) are all unaffected by this flag in either state. `GET
-/auth/local-login` (a minimal HTML login form) is **not** implemented yet —
-it remains a generic `404` regardless of `LOCAL_LOGIN`'s value until
-TASK-018 adds it.
+/auth/local-login` (a minimal HTML login form, CONTRACT-005 §11, TASK-018) is
+gated identically to the JSON endpoint: live only when `LOCAL_LOGIN=true`,
+otherwise the same generic `404` as any unmatched route.
 
 When `LOCAL_LOGIN=true`, `TENANT_ID`/`CLIENT_ID` are not required and may be
 absent from `.env` entirely; when present anyway they are simply unused.
@@ -121,6 +121,18 @@ naming the exact unlock time. On success, the response is
 header — the `bt_session` cookie is minted via the same `mintSessionToken`
 (`src/tokens.ts`) and cookie-construction logic CONTRACT-001's callback uses,
 not a reimplementation.
+
+`GET /auth/local-login` (CONTRACT-005 §11, TASK-018) serves a minimal,
+unstyled, self-contained HTML page (a username/password form) at the same
+gating as the JSON endpoint above. The page contains no credential
+verification of its own: its inline `<script>` calls `POST
+/auth/local-login` via `fetch()` on submit and only renders that response —
+on success it replaces the form with a plain "You're signed in." message on
+the same page (no redirect); on failure it displays the JSON response's
+`error` string verbatim (no reinterpretation), so disabled/locked/merged
+unknown-username-or-bad-password messages appear exactly as `POST
+/auth/local-login` produced them. No CSS, branding, or responsive design is
+included, per CONTRACT-005 §11.
 
 Brute-force protection has two layers, both configurable via optional
 `.env` variables (each validated as a positive integer if present; silently

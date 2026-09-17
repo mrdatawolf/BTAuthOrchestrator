@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect an internal app · BTAuthOrchestrator</title>
+<style>
+:root{color-scheme:light;--ink:#163042;--muted:#466174;--line:#ccdae1;--accent:#006c70;--paper:#fff;--bg:#f1f5f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.65 system-ui,sans-serif}
+main{max-width:1080px;margin:auto;padding:48px 28px 64px}header{border-bottom:3px solid var(--accent);padding-bottom:28px;margin-bottom:32px}
+.eyebrow{color:var(--accent);font-size:13px;font-weight:750;letter-spacing:.14em;text-transform:uppercase}h1{font-size:clamp(30px,5vw,48px);line-height:1.15;letter-spacing:-.035em;margin:12px 0 20px}h2{font-size:26px;line-height:1.3;margin-top:0}h3{font-size:20px}p{margin:12px 0}a{color:#006268}a:focus-visible{outline:3px solid #a55300;outline-offset:3px}
+nav{display:flex;gap:12px 24px;flex-wrap:wrap;margin-top:24px}section{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:28px;margin:24px 0;scroll-margin-top:20px}.note{border-left:4px solid #bd790c;background:#fff6df;padding:14px 18px;margin:20px 0}.small,figcaption{font-size:14px;color:var(--muted)}code{font: .9em/1.6 ui-monospace,monospace;overflow-wrap:anywhere}pre{padding:22px;background:#102c3b;color:#e7f1f6;border-radius:8px;overflow:auto;font-size:14px}pre code{overflow-wrap:normal}li{margin:12px 0}table{border-collapse:collapse;width:100%;font-size:15px}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--accent)}figure{margin:24px 0}.diagram{overflow:auto}svg{display:block;width:100%;height:auto;min-width:740px}svg text{font-family:system-ui,sans-serif;fill:var(--ink);font-size:14px}.lane{stroke:#aabdc7;stroke-dasharray:5 5}.arrow{stroke:var(--accent);stroke-width:2;fill:none}.box{fill:#e7f2f2;stroke:#afd0d0}.label{font-weight:700}.step{color:var(--accent);font-size:14px;font-weight:700}footer{color:var(--muted);font-size:14px}
+@media(max-width:600px){main{padding:24px 14px}section{padding:20px 16px}th,td{padding:8px}pre{padding:14px}}
+@media print{body{background:white}main{max-width:none;padding:0}section{break-inside:avoid}nav{display:none}pre{white-space:pre-wrap;color:black;background:#f4f4f4}svg{min-width:0}}
+</style>
+</head>
+<body><main>
+<header>
+<div class="eyebrow">Integration walkthrough · TASK-022</div>
+<h1>Connect an internal app</h1>
+<p>Your app sends the browser to BTAuthOrchestrator for sign-in, receives a shared <code>bt_session</code> cookie on a later browser request, and verifies its JWT on your server. Your app decides what that person may access.</p>
+<p class="small">Standalone documentation. Open this file directly in a browser; no server, build, internet connection, or live credentials are needed to view it. The diagrams and code are illustrative, not a running login client or SDK.</p>
+<nav aria-label="Walkthrough sections"><a href="#flow">1. Browser flow</a><a href="#cookie">2. Receive the session</a><a href="#verify">3. Verify on your server</a><a href="#local">4. Local login</a><a href="#check">5. Integration checks</a></nav>
+</header>
+<section id="flow">
+<div class="step">01 / OIDC login · LOCAL_LOGIN=false</div>
+<h2>Send the browser to the orchestrator</h2>
+<p>Example consuming app: <code>https://tools.biztechro.com</code>. Example orchestrator: <code>https://orca.biztechro.com</code>. These are deployment examples; this file makes no network requests.</p>
+<figure><div class="diagram" tabindex="0" role="region" aria-label="Scrollable OIDC sequence diagram">
+<svg viewBox="0 0 940 690" role="img" aria-labelledby="flow-title flow-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="flow-title">OIDC sign-in from the consuming app's perspective</title>
+<desc id="flow-desc">The browser visits the app, is redirected to the orchestrator, signs in at Entra, and returns to the orchestrator callback. The orchestrator exchanges the code with Entra and sets a session cookie. The user then returns manually to the app, which verifies the cookie.</desc>
+<defs><marker id="tip" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#006c70"/></marker></defs>
+<rect class="box" x="20" y="10" width="175" height="44" rx="8"/><text class="label" x="107" y="38" text-anchor="middle">Browser</text>
+<rect class="box" x="245" y="10" width="175" height="44" rx="8"/><text class="label" x="332" y="38" text-anchor="middle">Your app server</text>
+<rect class="box" x="475" y="10" width="175" height="44" rx="8"/><text class="label" x="562" y="38" text-anchor="middle">Orchestrator</text>
+<rect class="box" x="740" y="10" width="175" height="44" rx="8"/><text class="label" x="827" y="38" text-anchor="middle">Microsoft Entra</text>
+<path class="lane" d="M107 54V660 M332 54V660 M562 54V660 M827 54V660"/>
+<path class="arrow" marker-end="url(#tip)" d="M107 100H332"/><text x="116" y="87">1. Open protected page</text>
+<path class="arrow" marker-end="url(#tip)" d="M332 152H107"/><text x="116" y="138">2. 302 to /auth/login</text>
+<path class="arrow" marker-end="url(#tip)" d="M107 204H562"/><text x="116" y="190">3. GET orca…/auth/login</text>
+<path class="arrow" marker-end="url(#tip)" d="M562 256H107"/><text x="116" y="242">4. 302 to Entra (state, nonce, PKCE)</text>
+<path class="arrow" marker-end="url(#tip)" d="M107 308H827"/><text x="116" y="294">5. Browser signs in at Entra</text>
+<path class="arrow" marker-end="url(#tip)" d="M827 360H107"/><text x="116" y="346">6. Redirect browser to orchestrator /auth/callback?code=…&amp;state=…</text>
+<path class="arrow" marker-end="url(#tip)" d="M107 412H562"/><text x="116" y="398">7. Browser follows callback redirect</text>
+<path class="arrow" marker-end="url(#tip)" d="M562 454H827"/><text x="571" y="441">8. Exchange code (server-side)</text>
+<path class="arrow" marker-end="url(#tip)" d="M827 496H562"/><text x="571" y="483">Tokens; validate Entra ID token</text>
+<path class="arrow" marker-end="url(#tip)" d="M562 548H107"/><text x="116" y="534">9. 200 success page + Set-Cookie: bt_session=…</text>
+<path class="arrow" marker-end="url(#tip)" d="M107 614H332"/><text x="116" y="590">10. User returns to app</text><text x="116" y="638">Cookie: bt_session=… → verify</text>
+</svg></div><figcaption>The consuming app never handles Entra's authorization code or ID token. It receives the orchestrator's own signed session JWT.</figcaption></figure>
+<ol>
+<li><strong>Check the incoming session.</strong> If there is no valid session, redirect browser navigation to <code>https://orca.biztechro.com/auth/login</code>. Keep protected data unavailable until verification succeeds.</li>
+<li><strong>Let the orchestrator handle OIDC.</strong> It owns Entra discovery, the state/nonce/PKCE handshake, code exchange, and ID-token validation. Entra's registered callback belongs to the orchestrator: <code>https://orca.biztechro.com/auth/callback</code> in production.</li>
+<li><strong>Receive the orchestrator's cookie.</strong> Successful login returns HTTP 200 and “You're signed in. You may close this window.” The browser stores <code>bt_session</code> when the cookie's domain and transport requirements are met.</li>
+<li><strong>Return to the app.</strong> The user revisits the app or refreshes an existing app tab. That request carries the shared cookie; your server verifies it before using its identity claims.</li>
+</ol>
+<div class="note"><strong>There is currently no app callback or return-to parameter.</strong> Do not expect a redirect back to your tool after sign-in. The success page is the current endpoint of the login journey.</div>
+</section>
+<section id="cookie">
+<div class="step">02 / Browser → your server</div><h2>Read the cookie on the server</h2>
+<pre><code>Set-Cookie: bt_session=&lt;signed JWT&gt;; Domain=.biztechro.com; Path=/;
+            HttpOnly; SameSite=Lax; Expires=&lt;expiry&gt;; Max-Age=&lt;seconds&gt;
+            [Secure when COOKIE_SECURE=true]
+
+# Later request to your app, sent by the browser:
+Cookie: bt_session=&lt;signed JWT&gt;</code></pre>
+<p>Use your web framework's cookie parser on the incoming request. <code>HttpOnly</code> prevents browser JavaScript from reading this cookie; do not build the integration around <code>document.cookie</code>, localStorage, or a token in a URL.</p>
+<table><caption>What the consuming app verifies and uses</caption><thead><tr><th scope="col">Field</th><th scope="col">Meaning</th></tr></thead><tbody>
+<tr><td><code>alg / kid</code> (header)</td><td>RS256 and the matching signing-key identifier in the orchestrator's JWKS.</td></tr>
+<tr><td><code>iss</code></td><td>The configured <code>SERVICE_ISSUER</code>; production is <code>https://orca.biztechro.com</code>. Configure the trusted expected value in your app.</td></tr>
+<tr><td><code>sub / email / upn</code></td><td>Identity: Entra object ID, email, and preferred username. Use the verified issuer and subject as the identity key; email is not an authorization grant.</td></tr>
+<tr><td><code>iat / exp</code></td><td>Epoch seconds. Expiry is the next midnight in the orchestrator host's local timezone, not a fixed 24-hour lifetime. Verify the absolute expiry normally.</td></tr>
+<tr><td><code>aud / roles / groups / scopes</code></td><td>Absent by design. The token authenticates a person across the shared domain; your app owns authorization.</td></tr>
+</tbody></table>
+<div class="note"><strong>Localhost does not receive the shared-domain cookie.</strong> A response from <code>localhost:3210</code> cannot set a cookie for <code>.biztechro.com</code>. Viewing this file and fetching health/JWKS work locally, but browser SSO requires suitable <code>*.biztechro.com</code> hostnames that resolve to your test services. Changing <code>SERVICE_ISSUER</code> does not change the fixed cookie domain. For OIDC, the registered Entra redirect URI must match the configured issuer plus <code>/auth/callback</code>. When <code>COOKIE_SECURE=true</code>, consuming apps need HTTPS; the flag is independent of <code>NODE_ENV</code>.</div>
+</section>
+<section id="verify">
+<div class="step">03 / Your server</div><h2>Fetch public keys, then verify offline</h2>
+<p>Fetch <code>/.well-known/jwks.json</code> from a trusted orchestrator address. It supplies public signing keys; your app needs no orchestrator database, private signing key, client secret, or admin credential.</p>
+<figure><div class="diagram" tabindex="0" role="region" aria-label="Scrollable verification diagram"><svg viewBox="0 0 940 190" role="img" aria-labelledby="verify-title verify-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="verify-title">Separate key retrieval from request verification</title><desc id="verify-desc">Fetch public JWKS on startup or refresh. Then locally verify each cookie's signature and claims. Grant access only after the app's authorization check.</desc>
+<rect class="box" x="15" y="35" width="210" height="90" rx="8"/><text x="120" y="68" text-anchor="middle">Fetch trusted JWKS</text><text x="120" y="95" text-anchor="middle">Startup / explicit refresh</text>
+<path class="arrow" marker-end="url(#tip)" d="M225 80H300"/>
+<rect class="box" x="305" y="35" width="285" height="90" rx="8"/><text x="447" y="68" text-anchor="middle">Verify bt_session locally</text><text x="447" y="95" text-anchor="middle">Signature + issuer + expiry + claims</text>
+<path class="arrow" marker-end="url(#tip)" d="M590 80H665"/>
+<rect class="box" x="670" y="35" width="250" height="90" rx="8"/><text x="795" y="68" text-anchor="middle">Your app's authorization</text><text x="795" y="95" text-anchor="middle">Allow only permitted actions</text>
+<text x="447" y="162" text-anchor="middle">Invalid or missing token → deny protected access and offer sign-in</text>
+</svg></div></figure>
+<p>This Node.js example uses <code>jose</code> 6.x, the same library as the service. Save adapted code as an ES module in your consuming app. The HTML does not execute it.</p>
+<pre><code id="verification-code">// Illustrative Node.js ES module (.mjs), using jose 6.x.
+// In the consuming app: npm install jose
+import { createLocalJWKSet, jwtVerify } from &#x27;jose&#x27;;
+
+// Trusted deployment settings, never values supplied by the JWT or request.
+const expectedIssuer = &#x27;https://orca.biztechro.com&#x27;;
+const jwksUrl = &#x27;https://orca.biztechro.com/.well-known/jwks.json&#x27;;
+
+// Fetch once at app startup (or from an explicit refresh job).
+const response = await fetch(jwksUrl, {
+  signal: AbortSignal.timeout(5000),
+  cache: &#x27;no-store&#x27;,
+});
+if (!response.ok) throw new Error(&#x27;Unable to load signing keys&#x27;);
+const verifyKey = createLocalJWKSet(await response.json());
+
+export async function verifySession(token) {
+  // Your framework&#x27;s server-side cookie parser supplies token from bt_session.
+  if (typeof token !== &#x27;string&#x27; || token.length === 0) {
+    throw new Error(&#x27;Sign-in required&#x27;);
+  }
+  const { payload, protectedHeader } = await jwtVerify(token, verifyKey, {
+    algorithms: [&#x27;RS256&#x27;],
+    issuer: expectedIssuer,
+    requiredClaims: [&#x27;sub&#x27;, &#x27;email&#x27;, &#x27;upn&#x27;, &#x27;iat&#x27;, &#x27;exp&#x27;, &#x27;iss&#x27;],
+    // No audience option: these shared session tokens intentionally have no aud.
+  });
+  if (typeof protectedHeader.kid !== &#x27;string&#x27; || !protectedHeader.kid) {
+    throw new Error(&#x27;Missing signing key ID&#x27;);
+  }
+  for (const name of [&#x27;sub&#x27;, &#x27;email&#x27;, &#x27;upn&#x27;]) {
+    if (typeof payload[name] !== &#x27;string&#x27; || !payload[name].trim()) {
+      throw new Error(&#x27;Invalid identity claims&#x27;);
+    }
+  }
+  if (typeof payload.iat !== &#x27;number&#x27; || typeof payload.exp !== &#x27;number&#x27;
+      || payload.exp &lt;= payload.iat) {
+    throw new Error(&#x27;Invalid session lifetime&#x27;);
+  }
+  return { id: payload.sub, email: payload.email, username: payload.upn };
+}
+
+// In a protected request handler, using your framework&#x27;s parsed cookie:
+// try {
+//   const identity = await verifySession(request.cookies.bt_session);
+//   // Apply this app&#x27;s own authorization rules before serving protected data.
+// } catch {
+//   // Deny this request; offer sign-in or redirect browser navigation to /auth/login.
+//   // API requests should receive an authentication error, not protected data.
+// }
+</code></pre>
+<p><strong>Verification is not decoding.</strong> <code>jwtVerify</code> checks the signature and claims; merely parsing a JWT's payload provides no proof of identity. Do not select the trusted issuer or JWKS URL from an unverified token.</p>
+<p><strong>Offline has a freshness boundary.</strong> The example performs no network request inside <code>verifySession</code>; an already-loaded key set can verify known keys during an orchestrator outage. The JWKS endpoint sends <code>Cache-Control: no-store</code>; the example explicitly holds a process-local snapshot rather than relying on HTTP caching. Production integration needs an explicit key-refresh policy and bounded retry for an unknown <code>kid</code>. Reject a token if its key cannot be resolved. A stale snapshot does not learn that a key was removed until refreshed; this startup-only example is not a complete key-lifecycle client.</p>
+</section>
+<section id="local">
+<div class="step">04 / Alternative · LOCAL_LOGIN=true</div><h2>Local login, same consuming-app verification</h2>
+<p>Send the browser to <code>/auth/local-login</code> on the orchestrator instead of <code>/auth/login</code>. Its form submits JSON to the same origin:</p>
+<pre><code>POST /auth/local-login
+Content-Type: application/json
+
+{"username":"sample.user","password":"&lt;user-entered password&gt;"}
+
+# Success: HTTP 200 + the same bt_session Set-Cookie header
+{"status":"signed_in","username":"sample.user"}</code></pre>
+<p>The form stays on its success page. The user then returns to your app, which verifies the cookie exactly as above. Local tokens use the local user ID as <code>sub</code>, stored email as <code>email</code>, and username as <code>upn</code>. All signing, issuer, expiry, and cookie rules are shared.</p>
+<p>The modes are exclusive: <code>LOCAL_LOGIN=true</code> disables OIDC login/callback routes; <code>LOCAL_LOGIN=false</code> disables local login. Calling a disabled login path returns 404. Invalid local credentials return 401; disabled, locked, and throttled attempts return 403, 423, and 429 respectively. No successful session should be inferred from those errors.</p>
+</section>
+<section id="check">
+<div class="step">05 / Put the pieces together</div><h2>Checks for your integration</h2>
+<ol>
+<li><strong>Reachability:</strong> request <code>GET /health</code> and <code>GET /.well-known/jwks.json</code> on your orchestrator. A health response confirms liveness, not a completed sign-in.</li>
+<li><strong>Browser delivery:</strong> use the configured login mode and confirm the browser stores <code>bt_session</code> and sends it to your app's hostname. Check the domain and Secure setting if it does not.</li>
+<li><strong>Trust:</strong> configure the expected issuer and trusted JWKS endpoint in your app, and accept only RS256 signatures with the expected identity claims.</li>
+<li><strong>Failure handling:</strong> missing, tampered, expired, wrong-issuer, or unknown-key tokens must not unlock protected data. An expired session requires another sign-in; no refresh-token flow is implemented.</li>
+<li><strong>Authorization:</strong> a valid session establishes identity. Check your own access rules separately.</li>
+</ol>
+<p class="small">Documentation scope: current CONTRACT-001 and CONTRACT-005 flows, with the implemented configurable issuer from TASK-012. No service changes are required to view this walkthrough. Live OIDC additionally needs configured Entra registration and reachable callback infrastructure.</p>
+</section>
+<footer>BTAuthOrchestrator · External app integration sample · 17 September 2026</footer>
+</main></body></html>

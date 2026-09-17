@@ -66,6 +66,9 @@ including when creation is disabled. The full admin list API remains protected.
 
 ## Learn more
 
+- [External app integration walkthrough](docs/samples/external-app-integration.html)
+  — open the standalone HTML file in a browser for login diagrams, cookie
+  delivery, an offline verification example, and the local-login alternative.
 - `docs/DEVELOPMENT.md` — full technical detail: tech stack, repository
   layout, exact request/response behavior, and every command above in
   depth.

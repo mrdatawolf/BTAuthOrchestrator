@@ -20,7 +20,8 @@ Related ADRs: ADR-003 (records the architectural decision to add a
 permanent local-login path alongside Entra; this contract is its full
 behavioral specification).
 Supersedes:
-Superseded by:
+Superseded by: CONTRACT-006 for HTTP creation authorization and the prohibition
+on self-service registration only; all other sections remain in force.
 
 ## Purpose
 

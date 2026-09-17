@@ -37,6 +37,7 @@ export interface Config {
   issuer: string;
   emergencyRotationToken: string;
   localLogin: boolean;
+  allowNewLocalLoginCreation: boolean;
   localUserAdminToken: string;
   localLoginMaxFailedAttempts: number;
   localLoginLockoutMinutes: number;
@@ -194,6 +195,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv): Config {
     issuer: environment.SERVICE_ISSUER!.trim(),
     emergencyRotationToken: environment.EMERGENCY_ROTATION_TOKEN!.trim(),
     localLogin: normalizedLocalLogin === "true",
+    // Creation is opt-in; absent, empty, or unrecognized values fail closed.
+    allowNewLocalLoginCreation:
+      normalizeLocalLoginFlag(
+        environment.ALLOW_NEW_LOCAL_LOGIN_CREATION ?? environment.AllOW_NEW_LOCAL_LOGIN_CREATION,
+      ) === "true",
     localUserAdminToken: environment.LOCAL_USER_ADMIN_TOKEN!.trim(),
     localLoginMaxFailedAttempts,
     localLoginLockoutMinutes,

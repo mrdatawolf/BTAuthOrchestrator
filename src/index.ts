@@ -96,6 +96,7 @@ const LOCAL_LOGIN_FORM_HTML = `<!doctype html>
 <head><title>Local sign-in</title></head>
 <body>
 <h1>Local sign-in</h1>
+<p><a href="/auth/local-register">Create an account</a></p>
 <form id="login-form">
   <div>
     <label for="username">Username</label>
@@ -152,6 +153,76 @@ const LOCAL_LOGIN_FORM_HTML = `<!doctype html>
 </body>
 </html>
 `;
+
+const LOCAL_REGISTER_FORM_HTML = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Create an account</title></head>
+<body>
+<h1>Create an account</h1>
+<form id="create-user-form">
+  <div>
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
+  </div>
+  <div>
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" autocomplete="email" required>
+  </div>
+  <div>
+    <label for="password">Password (at least 12 characters)</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" minlength="12" required>
+  </div>
+  <button type="submit" id="create-user-button">Create account</button>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<p><a href="/auth/local-login">Sign in</a></p>
+<!-- LOCAL_USERS_LIST -->
+<script>
+(function () {
+  var form = document.getElementById("create-user-form");
+  var button = document.getElementById("create-user-button");
+  var message = document.getElementById("message");
+  form.addEventListener("submit", async function (event) {
+    event.preventDefault();
+    button.disabled = true;
+    message.textContent = "";
+    try {
+      var response = await fetch("/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("username").value,
+          email: document.getElementById("email").value,
+          password: document.getElementById("password").value
+        })
+      });
+      var result = await response.json();
+      if (response.ok) {
+        form.reset();
+        form.hidden = true;
+        message.textContent = "Your account has been created. You can now sign in.";
+        var row = document.createElement("tr");
+        var usernameCell = document.createElement("td");
+        var statusCell = document.createElement("td");
+        usernameCell.textContent = result.username;
+        statusCell.textContent = result.isActive ? "Active" : "Disabled";
+        row.appendChild(usernameCell);
+        row.appendChild(statusCell);
+        document.getElementById("local-users-body").appendChild(row);
+        document.getElementById("local-users-empty").hidden = true;
+      } else {
+        message.textContent = result.error || "Unable to create an account.";
+      }
+    } catch (error) {
+      message.textContent = "Unable to reach the service. Please try again.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>`;
 
 // CONTRACT-005 §4/Interfaces: admin CRUD API for /admin/users*. Same
 // defensive body-size-cap posture as EMERGENCY_ROTATION_BODY_LIMIT_BYTES/
@@ -872,21 +943,34 @@ export function createRequestHandler(
 
   async function handleAdminCreateUser(request: IncomingMessage): Promise<HandlerResult> {
     const sourceIp = extractSourceIp(request);
-    const { parsed, actedBy } = await readAdminRequestBody(request);
-
-    if (!checkAdminBearerAuth(request)) {
+    // CONTRACT-006: public creation is explicitly enabled by the operator.
+    // The gate applies even to callers holding the admin bearer token.
+    if (config.allowNewLocalLoginCreation !== true) {
       await writeAdminAuditBestEffort({
-        action: "auth_failure",
+        action: "create",
         targetUserId: null,
         targetUsername: null,
         changedFields: null,
         result: "failure",
-        failureReason: "bad_credential",
-        actorLabel: actedBy,
+        failureReason: "creation_disabled",
+        actorLabel: null,
         sourceIp,
       });
-      return adminUnauthorized();
+      return {
+        status: 403,
+        headers: ADMIN_USERS_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: "New local account creation is disabled." }),
+      };
     }
+
+    // Require JSON so a cross-origin HTML form cannot submit a simple request.
+    if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+      return { status: 415, headers: ADMIN_USERS_RESPONSE_HEADERS,
+        body: JSON.stringify({ error: "Content-Type must be application/json." }) };
+    }
+    const { parsed } = await readAdminRequestBody(request);
+    // Public callers cannot claim administrator attribution through actedBy.
+    const actedBy = "public-registration";
 
     if (typeof parsed !== "object" || parsed === null) {
       return adminBadRequest("Request body must be a JSON object.");
@@ -1249,9 +1333,31 @@ export function createRequestHandler(
       return;
     }
 
+    if (request.method === "GET" && (request.url ?? "").split("?")[0] === "/auth/local-register") {
+      let usersHtml: string;
+      try {
+        const users = await localUserStore.listUsers();
+        const escapeHtml = (value: string): string => value.replace(/[&<>"']/g,
+          character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+        usersHtml = `<h2>Local users</h2>
+<p id="local-users-empty"${users.length > 0 ? " hidden" : ""}>No local users yet.</p>
+<table><thead><tr><th scope="col">Username</th><th scope="col">Status</th></tr></thead>
+<tbody id="local-users-body">${users.map(user => `<tr><td>${escapeHtml(user.username)}</td><td>${user.isActive ? "Active" : "Disabled"}</td></tr>`).join("")}</tbody></table>`;
+      } catch {
+        usersHtml = '<h2>Local users</h2><p>Unable to load local users. Reload the page to try again.</p><p id="local-users-empty" hidden></p><table><thead><tr><th scope="col">Username</th><th scope="col">Status</th></tr></thead><tbody id="local-users-body"></tbody></table>';
+      }
+      const page = config.allowNewLocalLoginCreation === true
+        ? LOCAL_REGISTER_FORM_HTML
+        : '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Create an account</title></head><body><h1>Create an account</h1><p>New local account creation is disabled.</p><p><a href="/auth/local-login">Sign in</a></p><!-- LOCAL_USERS_LIST --></body></html>';
+      response.writeHead(200, { ...LOCAL_LOGIN_FORM_RESPONSE_HEADERS, "Cache-Control": "no-store" });
+      response.end(page.replace("<!-- LOCAL_USERS_LIST -->", () => usersHtml));
+      return;
+    }
+
     // CONTRACT-005 §4/§7: /admin/users* is reachable regardless of
-    // LOCAL_LOGIN's value (not gated by that switch), subject only to its
-    // own LOCAL_USER_ADMIN_TOKEN check — deliberately placed outside (and
+    // LOCAL_LOGIN's value (not gated by that switch). CONTRACT-006 makes POST
+    // creation public and gates it with allowNewLocalLoginCreation; other
+    // operations retain the LOCAL_USER_ADMIN_TOKEN check. Placed outside (and
     // before) the LOCAL_LOGIN-gated block below.
     {
       const adminUsersPath = (request.url ?? "").split("?")[0];

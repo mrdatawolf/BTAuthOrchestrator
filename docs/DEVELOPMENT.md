@@ -155,12 +155,37 @@ before any lookup, hashing, or audit write occurs.
 
 #### Local user admin API (CONTRACT-005 §4, TASK-016)
 
+Public account creation is now defined by [CONTRACT-006](contracts/CONTRACT-006-public-local-registration.md)
+(TASK-020), superseding CONTRACT-005's creation authorization.
+Set `ALLOW_NEW_LOCAL_LOGIN_CREATION=True` in `.env` and restart the service to
+enable the minimal form at `/auth/local-register` (for example,
+`http://localhost:3210/auth/local-register`). The local sign-in page links to it.
+The original spelling `AllOW_NEW_LOCAL_LOGIN_CREATION` also works when the
+uppercase spelling is absent. Only trimmed, case-insensitive `true` enables
+creation; missing or any other value disables it.
+
+The form posts username, email, and password to the same-origin `/admin/users`
+as JSON. This POST is public while enabled and returns 403 while disabled,
+even with a valid admin token. Other admin operations retain bearer-token
+authorization. Public creation uses the existing validation, password hashing,
+duplicate handling, and audit storage; attribution is `public-registration`.
+Non-JSON creation requests return 415. The switch is independent of LOCAL_LOGIN
+and does not affect operator bootstrap via `npm run seed`.
+
+The registration page also publicly lists every local username and its
+Active/Disabled status, even when creation is disabled (TASK-021). Status is
+the account's enabled flag, not online presence or temporary lockout. The page
+loads the list on each visit and appends a newly created account immediately;
+reload to see changes made elsewhere. Emails and credential data are excluded.
+This page uses the user store directly; GET `/admin/users` remains protected.
+
 `POST /admin/users`, `GET /admin/users`, `GET /admin/users/:id`,
 `PATCH /admin/users/:id`, and `DELETE /admin/users/:id` create, list, fetch,
 update, and hard-delete `local_users` rows. Every one of these endpoints is
 reachable **regardless of `LOCAL_LOGIN`'s value** — this surface is not
 gated by that switch, so an operator can provision/curate local user records
-whether or not local-login mode is currently active. Each request must carry
+whether or not local-login mode is currently active. Except for public creation
+(`POST /admin/users`, gated above), each request must carry
 `Authorization: Bearer <LOCAL_USER_ADMIN_TOKEN>`, checked with
 `crypto.timingSafeEqual` (never `===`), the same constant-time-comparison
 helper `POST /admin/emergency-rotate-keys` uses; a missing, malformed, or
@@ -316,6 +341,30 @@ ownership are rejected with a corrective `chmod` or `chown` message; the service
 does not modify their permissions or ownership automatically. A lock left after
 an unclean process termination must be removed manually after confirming no
 other service process is using the directory.
+
+## systemd startup
+
+Prepare the checkout with `npm ci`, configure `.env`, run `npm run build`,
+and run `npm run seed` as the intended service user. Then install and start:
+
+```sh
+sudo ./install-service.sh --start
+```
+
+The installer uses executable `start.sh` in the repository root. It works
+from any working directory and requires Node >=20.6.0 on the systemd service
+PATH (interactive shell/version-manager setup is not loaded). It checks the
+runtime, dependencies, compiled modules, configuration, database permissions
+and lock, and decryptability of the current signing key. Entra mode also checks
+the stored CLIENT_SECRET; local mode requires at least one active local user.
+Database checks use the existing migration and locking code, then close the
+database before starting the application. It does not install, build, seed,
+repair permissions, or delete stale locks. Rebuild after source updates.
+
+The launcher replaces itself with Node so systemd delivers shutdown signals
+directly. Failures go to the journal with setup guidance; inspect them using
+`journalctl -u btauthorchestrator -e` (substitute the installer-selected service
+name if the checkout directory or SERVICE_NAME differs).
 
 ## Coding conventions
 

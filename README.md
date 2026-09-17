@@ -47,6 +47,15 @@ default.
 
 ## Endpoints
 
+To enable public local account creation, set
+`ALLOW_NEW_LOCAL_LOGIN_CREATION=True` in `.env`, rebuild, and restart the
+service. Open `/auth/local-register` (for example,
+`http://localhost:3210/auth/local-register`), also linked from local sign-in.
+The form uses `POST /admin/users`. Missing or non-true values block creation
+on the server. Listing, editing, and deleting users still require the admin token.
+The registration page publicly shows local usernames and Active/Disabled status,
+including when creation is disabled. The full admin list API remains protected.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Liveness check. |

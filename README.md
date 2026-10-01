@@ -80,3 +80,7 @@ including when creation is disabled. The full admin list API remains protected.
   and reviewed.
 - `tasks/` — the authoritative record of what's done, in progress, or
   planned; the directory a task file lives in is its status.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

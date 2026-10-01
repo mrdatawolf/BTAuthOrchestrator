@@ -124,6 +124,14 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
     throw new Error(`Data directory error: ${dataDirectory} is not a directory.`);
   }
 
+  // Windows has no POSIX mode bits or uids (stat reports 0666/0777 and
+  // process.getuid is undefined), so the 0700/owner check cannot be expressed
+  // here. start.ps1 enforces the equivalent: an owner-only, non-inherited ACL
+  // (CONTRACT-007 §5).
+  if (process.platform === "win32") {
+    return;
+  }
+
   const actualMode = directoryStat.mode & 0o777;
   if (actualMode !== REQUIRED_DIRECTORY_MODE) {
     throw new Error(

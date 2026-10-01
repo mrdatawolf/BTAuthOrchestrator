@@ -366,6 +366,52 @@ directly. Failures go to the journal with setup guidance; inspect them using
 `journalctl -u btauthorchestrator -e` (substitute the installer-selected service
 name if the checkout directory or SERVICE_NAME differs).
 
+## Windows startup
+
+Run `start.bat` (it invokes `start.ps1` with `-ExecutionPolicy Bypass`). Before
+starting, it checks Node >=20.6.0, `node_modules`, and `dist/index.js`, then:
+
+- Creates `.env` from `.env.example` if absent.
+- Generates a 64-character lowercase hex `DB_ENCRYPTION_KEY` and writes it to
+  `.env` (UTF-8, no BOM) when the value is empty or still the
+  `.env.example` placeholder. It refuses if `PGLITE_DATA_DIR` already holds
+  data, because a new key cannot decrypt existing secrets. Back the key up.
+- Generates `EMERGENCY_ROTATION_TOKEN` and `LOCAL_USER_ADMIN_TOKEN` (64 hex
+  characters each) when either is empty or still the placeholder. A value
+  that is set but too short is left alone and reported by the configuration
+  check.
+- Locks an existing `PGLITE_DATA_DIR` to the Windows equivalent of `0700`:
+  owner-only full control, inheritance removed, children reset to inherit
+  it. It refuses (no auto-ownership change) if the directory is owned by
+  another account.
+- Stops with `npm run seed` instructions when `PGLITE_DATA_DIR` is missing or
+  empty, and repeats them when the shared check reports an incomplete
+  bootstrap or no active local user.
+- Runs the same configuration and database checks as `start.sh`
+  (`scripts/startup-check.js`).
+
+Because Windows has no POSIX mode bits or uids, the service's own
+`0700`/owner check is skipped on `win32`; `start.ps1` is the enforcement point
+there (CONTRACT-007 §5), so start the service through it rather than
+`npm start`.
+
+First setup on Windows:
+
+```bat
+npm ci
+npm run build
+start.bat
+npm run seed
+start.bat
+```
+
+The first `start.bat` writes the key and tokens to `.env`, then stops
+because the database is not seeded. Check the other `.env` values (Entra IDs,
+`SERVICE_ISSUER`, `LOCAL_LOGIN`) before seeding. `npm run seed` prompts for
+the Entra `CLIENT_SECRET` and the first local user's username, email, and
+password. The second `start.bat` locks down the data directory and starts the
+service.
+
 ## Coding conventions
 
 - Use TypeScript with strict type checking and ES module-compatible imports.

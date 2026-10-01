@@ -1,26 +1,16 @@
-# CONTRACT-004: Encrypted secret & key storage in PGlite
+# CONTRACT-007: Encrypted secret & key storage in PGlite
 
-Status: Retired
-Superseded by: CONTRACT-007 (Patrick decided, 2026-10-01, to add a Windows
-host alternative to the data-directory `0700`/owner requirement, enforced by
-the `start.ps1` launcher. This document's body below is preserved unmodified
-as the historical record.)
-Approved by: Patrick
-Approved date: 2026-09-15
-Related tasks: TASK-005 (schema/migrations implementation, unaffected —
-implemented against CONTRACT-002, behavior unchanged), TASK-006
-(bootstrap/seed implementation, unaffected), TASK-008 (key loading/JWKS
-implementation, unaffected), TASK-009 (emergency key-rotation trigger — this
-contract codifies its as-built interface as normative), TASK-011 (milestone
-review, Finding F1, prompted this supersession), CONTRACT-001 (OIDC login
-flow, consumes `getSecret`/`getCurrentSigningKey` defined here, unaffected),
-CONTRACT-003 (emergency-rotation authorization/audit — its
-`emergency_rotation_audit` table is the audit row this contract's
-`rotateSigningKeyEmergency` writes atomically; see Interfaces).
+Status: Accepted
+Approved by: Patrick Moon
+Approved date: 2026-10-01
+Related tasks: TASK-005, TASK-006, TASK-008, TASK-009 (all unaffected —
+see "Relationship to CONTRACT-004" below), CONTRACT-001 and CONTRACT-003
+(consumers of the Interfaces defined here, unaffected).
 Related ADRs: ADR-001 (contracts are retired by supersession, never amended
-in place — this document is that decision's first applied instance).
-Supersedes: CONTRACT-002 (retired in full; see CONTRACT-002's own header and
+in place).
+Supersedes: CONTRACT-004 (retired in full; see CONTRACT-004's own header and
 ADR-001 for why).
+Superseded by:
 
 ## Purpose
 
@@ -40,8 +30,18 @@ that lives only in `.env`; the data directory is additionally hardened via
 OS permissions; the service is single-process; and signing keys are tracked
 by `kid` and status to allow more than one simultaneously valid key.
 
-**Relationship to CONTRACT-002:** this contract supersedes CONTRACT-002 in
-full (ADR-001). Every section below is identical to CONTRACT-002 except
+**Relationship to CONTRACT-004:** this contract supersedes CONTRACT-004 in
+full (ADR-001). Every section below is identical to CONTRACT-004 except the
+data-directory bullet in Preconditions, "Data-directory permissions" (§5),
+the matching Postconditions bullet and Failure behavior row, and the new
+Resolved decision #17, which add a Windows host alternative to the POSIX
+`0700`/owner requirement. The service-side check is unchanged on POSIX
+hosts; on Windows it is replaced by an owner-only ACL applied by the
+`start.ps1` launcher, because Windows exposes no POSIX mode bits or uids to
+Node. Nothing else changed; no other task's implementation is affected.
+
+**Relationship to CONTRACT-002 (carried forward from CONTRACT-004):**
+CONTRACT-004 superseded CONTRACT-002 in full (ADR-001). Every section below is identical to CONTRACT-002 except
 "Key lifecycle" (§3), "Interfaces," the rotation-related "Validation
 requirements" bullet, and "Resolved decisions" #13, which are rewritten to
 match TASK-009's actual, independently-verified implementation rather than
@@ -164,7 +164,9 @@ against changed.
 - `PGLITE_DATA_DIR` is owned by a dedicated service OS user (not a shared or
   general-purpose account, not root) and is mode `0700` (owner
   read/write/execute only, no group or world access) at all times the
-  process is running. This is defense in depth *in addition to*, not
+  process is running. On a Windows host the equivalent is an NTFS ACL
+  granting full control to the owning service account only, with
+  inheritance from the parent removed (see §5). This is defense in depth *in addition to*, not
   instead of, encryption — a filesystem-level compromise that stops short of
   full OS-user compromise (e.g. a misconfigured sibling service, a
   world-readable backup job) must not expose PGlite's on-disk files to
@@ -377,6 +379,26 @@ On startup, before opening PGlite, the process must:
   directory owned by a different, unexpected user is a privilege-escalation
   footgun this contract deliberately avoids).
 
+On Windows (`process.platform === 'win32'`), POSIX mode bits and uids are
+not available to Node (directories report `0666`/`0777` and
+`process.getuid` is undefined), so the process skips the mode and
+ownership verification above and the supported launcher, `start.ps1`
+(invoked via `start.bat`), enforces the equivalent before starting the
+process:
+- If `PGLITE_DATA_DIR` exists and is owned by an account other than the one
+  running the launcher, refuse to start with a clear error naming the
+  required `icacls /setowner` fix. Ownership is never changed
+  automatically, matching the POSIX rule.
+- Otherwise, replace the directory's ACL with a single full-control entry
+  for the running account, with inheritance from the parent removed, and
+  reset existing children to inherit only that entry. Unlike the POSIX
+  path, the launcher repairs the ACL rather than refusing: re-applying an
+  owner-only ACL for the owner can only narrow access, never widen it or
+  move it to a different account.
+- Starting the process on Windows other than through `start.ps1` (e.g.
+  `npm start` directly) bypasses this enforcement; that is an operator
+  error, not a supported path.
+
 ### 6. Single-process enforcement
 
 The process must not silently tolerate a second concurrent instance against
@@ -415,7 +437,9 @@ call):**
   observable via this contract's interfaces).
 - A `revoked` key's public material is never returned by
   `listPublishableSigningKeys()` (see Interfaces).
-- `PGLITE_DATA_DIR` is mode `0700`, owned by the dedicated service user.
+- `PGLITE_DATA_DIR` is mode `0700`, owned by the dedicated service user
+  (on Windows: owner-only, non-inherited ACL, owned by the service
+  account; see §5).
 - At most one OS process has `PGLITE_DATA_DIR` open at a time.
 - Every row's ciphertext/IV/auth-tag write is atomic: a row is either fully
   present with all three populated and internally consistent, or it does
@@ -437,7 +461,7 @@ call):**
 | Condition | Required behavior |
 |---|---|
 | `DB_ENCRYPTION_KEY` missing, malformed, or not exactly 32 bytes when decoded | Fail closed at process startup, before opening PGlite or serving any request. Clear, non-secret-revealing error message. |
-| `PGLITE_DATA_DIR` exists with permissions/ownership other than `0700`/dedicated service user | Fail closed at startup with a clear error naming the required fix. No auto-`chown`. |
+| `PGLITE_DATA_DIR` exists with permissions/ownership other than `0700`/dedicated service user | Fail closed at startup with a clear error naming the required fix. No auto-`chown`. On Windows, `start.ps1` instead re-applies the owner-only ACL, and fails closed with an `icacls /setowner` fix only when the directory is owned by a different account (§5). |
 | A second process attempts to open an already-open `PGLITE_DATA_DIR` | Fail fast with a clear error; must not corrupt the database or silently proceed. |
 | Decryption of `CLIENT_SECRET` or the current signing key fails (wrong key, tampered/corrupted row) at a point where CONTRACT-001's login flow needs it | Treat as a startup/critical error — the process must not serve login traffic without a decryptable `CLIENT_SECRET` and current signing key. The specific decryption failure reason is logged server-side only, never including the ciphertext, key, or any recovered plaintext fragment. |
 | Seed script run against an already-fully-seeded database | Refuse; exit non-zero; make no writes. |
@@ -613,7 +637,7 @@ specifically so that future work needs no migration to use them.
 ## Resolved decisions
 
 The following were judgment calls this contract made because TASK-003 did
-not settle them explicitly, carried forward unchanged from CONTRACT-002
+not settle them explicitly, carried forward unchanged from CONTRACT-004 (and, before it, CONTRACT-002)
 except where noted.
 
 1. **Single-layer envelope construction, not a two-layer per-value DEK.**
@@ -731,3 +755,14 @@ except where noted.
     user, see Preconditions and Failure behavior) and enforces it
     defensively at startup; it does not require a tracked implementation
     task for creating the OS user or writing a systemd unit.
+17. **Windows hosts use a launcher-enforced, owner-only ACL in place of
+    `0700`.** Decided by Patrick (2026-10-01). Windows exposes no POSIX
+    mode bits or uids to Node, so the process's own `0700`/owner check
+    could never pass there. On `win32` the process skips that check, and
+    `start.ps1` applies an owner-only, non-inherited ACL to an existing
+    `PGLITE_DATA_DIR` before every start, refusing (never auto-changing
+    ownership) if another account owns it. See §5. The same launcher
+    generates `DB_ENCRYPTION_KEY` in `.env` only when it is absent or still
+    the `.env.example` placeholder and `PGLITE_DATA_DIR` holds no data,
+    which keeps Resolved decision #14 intact: an existing database is never
+    paired with a newly generated key.

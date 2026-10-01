@@ -73,7 +73,7 @@ including when creation is disabled. The full admin list API remains protected.
   layout, exact request/response behavior, and every command above in
   depth.
 - `docs/contracts/` — the behavioral contracts (`CONTRACT-001` login flow,
-  `CONTRACT-003` emergency rotation, `CONTRACT-004` encrypted storage)
+  `CONTRACT-003` emergency rotation, `CONTRACT-007` encrypted storage)
   this service is built against.
 - `NOTES.md` — the original design rationale and open questions.
 - `CLAUDE.md` / `AGENTS.md` — how work on this repo is planned, approved,

@@ -50,7 +50,9 @@ function New-RandomHex {
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Fail 'Install Node.js >=20.6.0 and make sure node is on PATH.'
 }
-& node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 6) ? 0 : 1)'
+# Windows PowerShell 5.1 strips embedded double quotes when passing native
+# arguments. Use a regex delimiter so the JavaScript needs no inner quotes.
+& node -e 'const [major, minor] = process.versions.node.split(/\./).map(Number); process.exit(major > 20 || (major === 20 && minor >= 6) ? 0 : 1)'
 if ($LASTEXITCODE -ne 0) { Fail 'Node.js >=20.6.0 is required.' }
 if (-not (Test-Path -LiteralPath 'node_modules' -PathType Container)) { Fail "Dependencies are missing. Run npm ci in $AppDir." }
 if (-not (Test-Path -LiteralPath 'dist\index.js' -PathType Leaf)) { Fail "Compiled application is missing. Run npm run build in $AppDir." }

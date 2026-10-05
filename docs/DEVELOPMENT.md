@@ -368,8 +368,15 @@ name if the checkout directory or SERVICE_NAME differs).
 
 ## Windows startup
 
-Run `start.bat` (it invokes `start.ps1` with `-ExecutionPolicy Bypass`). Before
-starting, it checks Node >=20.6.0, `node_modules`, and `dist/index.js`, then:
+Run `start.bat` (it invokes `start.ps1` with `-ExecutionPolicy Bypass`).
+
+The batch wrapper clears its inherited `PSModulePath` inside `setlocal`, so
+Windows PowerShell rebuilds its own default module paths. This prevents a
+PowerShell 7 parent session from causing Windows PowerShell to load incompatible
+versions of built-in modules such as `Microsoft.PowerShell.Security` (`Get-Acl`).
+The parent session's environment is unchanged.
+
+Before starting, it checks Node >=20.6.0, `node_modules`, and `dist/index.js`, then:
 
 - Creates `.env` from `.env.example` if absent.
 - Generates a 64-character lowercase hex `DB_ENCRYPTION_KEY` and writes it to

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { exportJWK, importSPKI } from "jose";
 
 import { loadConfig, type Config } from "./config.js";
+import { createApiDocsHandler } from "./apiDocs.js";
 import { openDatabase, prepareDataDirectory, type DatabaseHandle } from "./database.js";
 import { createIpThrottle, type IpThrottle } from "./ipThrottle.js";
 import {
@@ -424,6 +425,7 @@ export function createRequestHandler(
   config: Config,
   localUserStore: LocalUserStore,
 ): RequestListener {
+  const handleApiDocs = createApiDocsHandler(config);
   const handshakeStore = createHandshakeStore();
   const discoveryCache = new EntraDiscoveryCache();
   const ipThrottle: IpThrottle = createIpThrottle(
@@ -1265,6 +1267,7 @@ export function createRequestHandler(
   }
 
   return async (request, response) => {
+    if (await handleApiDocs(request, response)) return;
     if (config.localLogin === false && request.method === "GET" && request.url === "/auth/login") {
       const result = await handleLogin();
       response.writeHead(result.status, result.headers);

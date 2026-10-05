@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "jose": "^6.2.4"
+    "jose": "^6.2.4",
+    "swagger-ui-dist": "^5.33.1"
   }
 }

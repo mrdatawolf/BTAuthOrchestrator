@@ -1,0 +1,63 @@
+import type { Config } from "./config.js";
+
+type Schema = Record<string, unknown>;
+const string = { type: "string" };
+const object = (properties: Record<string, Schema>, required: string[] = []) => ({ type: "object", properties, required });
+const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+const json = (description: string, schema: Schema) => ({ description, content: { "application/json": { schema } } });
+const html = (description: string) => ({ description, content: { "text/html": { schema: string } } });
+const errors = (...codes: number[]) => Object.fromEntries(codes.map(code => [code, json(({
+  400: "Invalid request", 401: "Invalid or missing credentials", 403: "Disabled account or account creation disabled",
+  404: "Not found or login route disabled in this mode", 409: "Username or email already exists",
+  415: "Content-Type must be application/json", 423: "Account temporarily locked; error includes unlock time",
+  429: "Source IP throttled", 500: "Internal server error",
+} as Record<number, string>)[code] ?? "Error", ref("Error"))]));
+const body = (schema: Schema, required = true) => ({ required, content: { "application/json": { schema } } });
+const adminSecurity = [{ LocalUserAdminToken: [] }];
+const id = [{ name: "id", in: "path", required: true, schema: string, description: "Local user ID" }];
+
+/** Live configuration is deliberately limited to public feature switches, never credentials. */
+export function createOpenApiDocument(config: Config) {
+  const localMode = config.localLogin;
+  const paths: Record<string, unknown> = {
+    "/health": { get: { tags: ["Service"], summary: "Check service health", responses: { 200: json("Healthy", object({ status: { type: "string", enum: ["ok"] } }, ["status"])) } } },
+    "/.well-known/jwks.json": { get: { tags: ["Service"], summary: "Get public RS256 signing keys", description: "Includes current and retired keys; excludes revoked keys. Cache-Control: no-store.", responses: { 200: json("Public keys", object({ keys: { type: "array", items: ref("Jwk") } }, ["keys"])), ...errors(500) } } },
+    "/auth/local-register": { get: { tags: ["Authentication"], summary: "Account registration page and public username/status list", description: `Available in both login modes. Account creation is currently ${config.allowNewLocalLoginCreation ? "enabled" : "disabled"}. Lists usernames and Active/Disabled status even when creation is disabled.`, responses: { 200: html("Registration page") } } },
+    "/admin/users": {
+      get: { tags: ["Users"], summary: "List local users", security: adminSecurity, responses: { 200: json("Users", object({ users: { type: "array", items: ref("User") } }, ["users"])), ...errors(401, 500) } },
+      post: { tags: ["Users"], summary: "Publicly register a local user", description: `Requires ALLOW_NEW_LOCAL_LOGIN_CREATION=true; currently ${config.allowNewLocalLoginCreation ? "enabled" : "disabled"}. Disabled creation returns 403 even with an admin token. Username is trimmed and lowercased. actedBy is accepted but attribution is public-registration.`, requestBody: body(ref("CreateUser")), responses: { 201: json("Created user", ref("User")), ...errors(400, 403, 409, 415, 500) } },
+    },
+    "/admin/users/{id}": {
+      get: { tags: ["Users"], summary: "Get a local user", security: adminSecurity, parameters: id, responses: { 200: json("User", ref("User")), ...errors(401, 404, 500) } },
+      patch: { tags: ["Users"], summary: "Update a local user", description: "Supply at least one of email, password, or isActive. Username cannot be changed. Changing password resets account lockout. actedBy is an unverified caller label.", security: adminSecurity, parameters: id, requestBody: body(ref("UpdateUser")), responses: { 200: json("Updated user", ref("User")), ...errors(400, 401, 404, 409, 500) } },
+      delete: { tags: ["Users"], summary: "Permanently delete a local user", description: "Audit records are retained.", security: adminSecurity, parameters: id, responses: { 200: json("Deleted", object({ status: { type: "string", enum: ["deleted"] }, id: string, username: string }, ["status", "id", "username"])), ...errors(401, 404, 500) } },
+    },
+    "/admin/emergency-rotate-keys": { post: { tags: ["Signing keys"], summary: "Revoke the current signing key and generate a new one", description: "Invalidates tokens signed with the previous key for verifiers using fresh JWKS. Uses a dedicated emergency token; a session cookie does not authorize this operation. triggeredBy is an unverified caller label. Optional malformed body is ignored.", security: [{ EmergencyRotationToken: [] }], requestBody: body(object({ triggeredBy: string }), false), responses: { 200: json("Rotated", object({ status: { type: "string", enum: ["rotated"] }, previousKid: string, newKid: string, rotatedAt: { type: "string", format: "date-time" } }, ["status", "previousKid", "newKid", "rotatedAt"])), ...errors(401, 500) } } },
+  };
+  if (localMode) {
+    paths["/auth/local-login"] = {
+      get: { tags: ["Authentication"], summary: "Local sign-in form", responses: { 200: html("Sign-in page") } },
+      post: { tags: ["Authentication"], summary: "Sign in with username and password", description: "Sets the HttpOnly bt_session cookie scoped to .biztechro.com, expiring at next local midnight. Unknown username and wrong password share the same 401 response.", requestBody: body(object({ username: string, password: { type: "string", format: "password" } }, ["username", "password"])), responses: { 200: { ...json("Signed in", object({ status: { type: "string", enum: ["signed_in"] }, username: string }, ["status", "username"])), headers: { "Set-Cookie": { schema: string, description: "bt_session session cookie" } } }, ...errors(400, 401, 403, 423, 429, 500) } },
+    };
+  } else {
+    paths["/auth/login"] = { get: { tags: ["Authentication"], summary: "Begin Entra OIDC sign-in", description: "Open in a browser to follow the redirect. Creates a single-use, ten-minute state/nonce/PKCE handshake.", responses: { 302: { description: "Redirect to Entra", headers: { Location: { schema: string } } }, 502: html("Entra unavailable"), 500: html("Sign-in failed") } } };
+    paths["/auth/callback"] = { get: { tags: ["Authentication"], summary: "Entra OIDC callback", description: "Entra redirect target, not a standalone login endpoint. Validates state and tokens and sets the bt_session cookie on success.", parameters: ["code", "state", "error"].map(name => ({ name, in: "query", schema: string })), responses: { 200: { ...html("Signed in"), headers: { "Set-Cookie": { schema: string } } }, 400: html("Invalid, rejected, or expired handshake"), 500: html("Sign-in failed"), 502: html("Entra unavailable") } } };
+  }
+  return {
+    openapi: "3.0.3", info: { title: "BT Auth Orchestrator API", version: "0.9.0", description: `Authentication and local user management. Active login mode: ${localMode ? "local" : "Entra"}. Inactive login routes return 404 and are omitted. Admin user operations remain available in either mode. Session cookies do not authorize admin operations.` },
+    servers: [{ url: "/", description: "This service" }], paths,
+    components: {
+      securitySchemes: {
+        LocalUserAdminToken: { type: "http", scheme: "bearer", description: "LOCAL_USER_ADMIN_TOKEN (not a session JWT)" },
+        EmergencyRotationToken: { type: "http", scheme: "bearer", description: "EMERGENCY_ROTATION_TOKEN (separate from the user admin token)" },
+      },
+      schemas: {
+        Error: object({ error: string }, ["error"]),
+        User: object({ id: string, username: string, email: string, isActive: { type: "boolean" }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" } }, ["id", "username", "email", "isActive", "createdAt", "updatedAt"]),
+        CreateUser: object({ username: { type: "string", minLength: 3, maxLength: 64, description: "Trimmed and lowercased; then must match [a-z0-9._-]+" }, email: { type: "string", format: "email" }, password: { type: "string", format: "password", minLength: 12 }, actedBy: string }, ["username", "email", "password"]),
+        UpdateUser: { ...object({ email: { type: "string", format: "email" }, password: { type: "string", format: "password", minLength: 12 }, isActive: { type: "boolean" }, actedBy: string }), anyOf: [{ required: ["email"] }, { required: ["password"] }, { required: ["isActive"] }] },
+        Jwk: object({ kty: { type: "string", enum: ["RSA"] }, use: { type: "string", enum: ["sig"] }, alg: { type: "string", enum: ["RS256"] }, kid: string, n: string, e: string }, ["kty", "use", "alg", "kid", "n", "e"]),
+      },
+    },
+  };
+}

@@ -412,6 +412,27 @@ the Entra `CLIENT_SECRET` and the first local user's username, email, and
 password. The second `start.bat` locks down the data directory and starts the
 service.
 
+## Interactive API documentation
+
+Open `/api/docs` (or `/docs`) on the running service, for example
+`http://localhost:3210/api/docs`. Swagger UI and its assets are served locally;
+no CDN is required. `/api/openapi.json` (alias `/openapi.json`) exposes the
+OpenAPI 3.0 document used by the UI and client generators.
+
+The document is generated from `src/openapi.ts` and the startup configuration.
+It includes only the active local/Entra login routes and describes the current
+registration switch. Both docs endpoints are public and contain no credential
+values. Swagger's Authorize dialog accepts the dedicated user-admin and
+emergency-rotation bearer tokens separately; session cookies do not grant
+admin access. Try it out sends real requests to this service. Authorization
+is not persisted across reloads, and the external spec validator is disabled.
+
+When changing endpoints, update their schemas, responses, and security in
+`src/openapi.ts` in the same change. Swagger renders this explicit description;
+it does not infer behavior from handler code. Verify with `npm run build`
+and `node scripts/test-api-docs.js`. Rebuild and restart existing deployments
+after installing dependencies to enable these routes.
+
 ## Coding conventions
 
 - Use TypeScript with strict type checking and ES module-compatible imports.

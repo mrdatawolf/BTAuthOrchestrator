@@ -84,3 +84,11 @@ including when creation is disabled. The full admin list API remains protected.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## API documentation
+
+Open `/api/docs` on the running service for interactive Swagger documentation
+(for example, `http://localhost:3210/api/docs`). Download the OpenAPI document
+at `/api/openapi.json`. Documentation reflects the configured login mode and
+registration switch. Try it out calls the running API; protected operations
+require their dedicated bearer tokens in Authorize.

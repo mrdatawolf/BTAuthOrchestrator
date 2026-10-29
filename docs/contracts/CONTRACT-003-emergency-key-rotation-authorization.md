@@ -10,7 +10,8 @@ contract's mechanism deliberately does **not** accept as a credential)
 Related ADRs: none
 Superseded by: CONTRACT-010 for the "UX expectations" statement that no
 browser-facing UI is provided for the emergency rotation trigger only;
-CONTRACT-012 for how `source_ip` is derived. All other sections remain in
+CONTRACT-012 for how `source_ip` is derived (carried forward by CONTRACT-013
+after CONTRACT-012's retirement, 2026-10-29). All other sections remain in
 force.
 
 ## Purpose

@@ -37,7 +37,3 @@ None.
 ## Implementation handoff
 
 Not started.
-
-## Review
-
-Not reviewed.

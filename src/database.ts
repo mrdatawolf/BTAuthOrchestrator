@@ -1,6 +1,8 @@
-import { constants } from "node:fs";
-import { mkdir, open, stat, unlink, type FileHandle } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+
+import { acquireProcessLock } from "./processLock.js";
+import { checkContainerStorage, isContainerMode, containerOwnershipFix } from "./container.js";
 
 import { PGlite } from "@electric-sql/pglite";
 
@@ -113,6 +115,7 @@ export interface DatabaseHandle {
 }
 
 export async function prepareDataDirectory(dataDirectory: string): Promise<void> {
+  await checkContainerStorage(dataDirectory);
   try {
     await mkdir(dataDirectory, { mode: REQUIRED_DIRECTORY_MODE, recursive: true });
   } catch (error) {
@@ -141,6 +144,9 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
   }
 
   const actualMode = directoryStat.mode & 0o777;
+  if (isContainerMode() && (actualMode !== REQUIRED_DIRECTORY_MODE || directoryStat.uid !== process.getuid?.())) {
+    throw new Error(`Data directory permissions/ownership error: /data has mode ${modeString(actualMode)}, owner ${directoryStat.uid}. ${containerOwnershipFix()}`);
+  }
   if (actualMode !== REQUIRED_DIRECTORY_MODE) {
     throw new Error(
       `Data directory permissions error: ${dataDirectory} must have mode 0700 (found ${modeString(actualMode)}). Run: chmod 700 ${dataDirectory}`,
@@ -170,7 +176,7 @@ export async function openDatabase(dataDirectory: string): Promise<DatabaseHandl
     if (database !== undefined) {
       await database.close().catch(() => undefined);
     }
-    await releaseProcessLock(lock, lockPath).catch(() => undefined);
+    await lock.close().catch(() => undefined);
     throw error;
   }
 
@@ -181,30 +187,9 @@ export async function openDatabase(dataDirectory: string): Promise<DatabaseHandl
       if (closed) return;
       closed = true;
       await database.close();
-      await releaseProcessLock(lock, lockPath);
+      await lock.close();
     },
   };
-}
-
-async function acquireProcessLock(lockPath: string): Promise<FileHandle> {
-  try {
-    const lock = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    await lock.writeFile(`${process.pid}\n`);
-    return lock;
-  } catch (error) {
-    const code = error instanceof Error && "code" in error ? error.code : undefined;
-    if (code === "EEXIST") {
-      throw new Error(
-        `Single-process error: the data directory is already locked (${lockPath}). Stop the other BTAuthOrchestrator process before starting this one.`,
-      );
-    }
-    throw new Error(`Single-process error: unable to create lock ${lockPath}: ${errorMessage(error)}`);
-  }
-}
-
-async function releaseProcessLock(lock: FileHandle, lockPath: string): Promise<void> {
-  await lock.close();
-  await unlink(lockPath);
 }
 
 function modeString(mode: number): string {

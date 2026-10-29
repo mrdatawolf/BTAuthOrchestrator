@@ -5,7 +5,7 @@ const { join } = require("node:path");
 
 const result = spawnSync(
   process.execPath,
-  ["--env-file=.env", join(__dirname, "..", "dist", "seed.js"), ...process.argv.slice(2)],
+  [...(process.argv.includes("--non-interactive") || process.env.BT_CONTAINER_MODE === "1" ? [] : ["--env-file=.env"]), join(__dirname, "..", "dist", "seed.js"), ...process.argv.slice(2)],
   { stdio: "inherit" },
 );
 if (result.error !== undefined) {

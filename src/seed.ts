@@ -2,6 +2,7 @@ import { generateKeyPair, randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import { promisify } from "node:util";
 
+import { isContainerMode } from "./container.js";
 import { loadConfig } from "./config.js";
 import { openDatabase, prepareDataDirectory, type DatabaseHandle } from "./database.js";
 import { createLocalUserStore } from "./localUsers.js";
@@ -67,7 +68,7 @@ function validateLocalUserPassword(raw: string): string {
 export async function main(arguments_: string[] = process.argv.slice(2)): Promise<void> {
   let databaseHandle: DatabaseHandle | undefined;
   try {
-    const { clientSecretFile, localUserFile } = parseArguments(arguments_);
+    const { clientSecretFile, localUserFile, nonInteractive } = parseArguments(arguments_);
     const config = loadConfig(process.env);
     await prepareDataDirectory(config.pgliteDataDir);
 
@@ -96,9 +97,36 @@ export async function main(arguments_: string[] = process.argv.slice(2)): Promis
     const hasCurrentKey = state.rows[0]?.has_current_key ?? false;
     const hasLocalUser = state.rows[0]?.has_local_user ?? false;
 
+    if (nonInteractive) {
+      const ignored = [
+        ...(hasClientSecret ? ["CLIENT_SECRET"] : []),
+        ...(hasLocalUser ? ["INITIAL_LOCAL_USER_USERNAME", "INITIAL_LOCAL_USER_EMAIL", "INITIAL_LOCAL_USER_PASSWORD"] : []),
+      ].filter(name => process.env[name] !== undefined);
+      for (const name of ignored) console.warn(`${name} ignored: already seeded; changing it has no effect. Remove it from the app configuration.`);
+      const needed = [
+        ...(!hasClientSecret ? ["CLIENT_SECRET"] : []),
+        ...(!hasLocalUser ? ["INITIAL_LOCAL_USER_USERNAME", "INITIAL_LOCAL_USER_EMAIL", "INITIAL_LOCAL_USER_PASSWORD"] : []),
+      ];
+      const missing = needed.filter(name => !process.env[name]?.trim());
+      if (missing.length) throw new Error(`Missing seed input(s): ${missing.join(", ")}`);
+      // Validate ALL missing pieces before writing any seed row.
+      if (!hasClientSecret) clientSecretFromFile = process.env.CLIENT_SECRET!;
+      if (!hasLocalUser) {
+        const validate = (name: string, fn: (value: string) => string): string => {
+          try { return fn(process.env[name]!); }
+          catch { throw new Error(`Invalid seed input: ${name}. Check the documented format in the app configuration.`); }
+        };
+        localUserFromFile = {
+          username: validate("INITIAL_LOCAL_USER_USERNAME", validateLocalUserUsername),
+          email: validate("INITIAL_LOCAL_USER_EMAIL", validateLocalUserEmail),
+          password: validate("INITIAL_LOCAL_USER_PASSWORD", validateLocalUserPassword),
+        };
+      }
+    }
+
     if (hasClientSecret && hasCurrentKey && hasLocalUser) {
       console.error("Database already seeded; nothing to do.");
-      process.exitCode = 1;
+      process.exitCode = nonInteractive ? 0 : 1;
       return;
     }
 
@@ -159,6 +187,7 @@ export async function main(arguments_: string[] = process.argv.slice(2)): Promis
 }
 
 interface ParsedArguments {
+  nonInteractive: boolean;
   clientSecretFile: string | undefined;
   localUserFile: string | undefined;
 }
@@ -166,7 +195,9 @@ interface ParsedArguments {
 function parseArguments(arguments_: string[]): ParsedArguments {
   let clientSecretFile: string | undefined;
   let localUserFile: string | undefined;
+  let nonInteractive = false;
   for (const argument of arguments_) {
+    if (argument === "--non-interactive") { nonInteractive = true; continue; }
     if (argument.startsWith("--client-secret=")) {
       throw new Error("CLIENT_SECRET must not be supplied as a command-line value. Use the hidden prompt or --client-secret-file=<path>.");
     }
@@ -192,9 +223,13 @@ function parseArguments(arguments_: string[]): ParsedArguments {
       if (localUserFile === "") throw new Error("--local-user-file requires a path.");
       continue;
     }
-    throw new Error(`Unknown argument: ${argument}`);
+    throw new Error("Unknown seed argument; no argument values are logged.");
   }
-  return { clientSecretFile, localUserFile };
+  if (isContainerMode() && !nonInteractive) throw new Error("Container seeding requires --non-interactive.");
+  if (nonInteractive && (clientSecretFile !== undefined || localUserFile !== undefined)) {
+    throw new Error("--non-interactive does not accept --client-secret-file or --local-user-file; use environment variables.");
+  }
+  return { clientSecretFile, localUserFile, nonInteractive };
 }
 
 async function readAndDeleteSecretFile(path: string): Promise<string> {

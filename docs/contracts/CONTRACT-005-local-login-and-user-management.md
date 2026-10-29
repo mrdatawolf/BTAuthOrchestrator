@@ -28,7 +28,8 @@ at /admin/console); CONTRACT-011 for §4's token-only authorization of
 /admin/users* (an active local user's session is also accepted) and §6's actor
 recording on admin audit rows; CONTRACT-008 (OQ-8) for §5's input-channel
 sentence, in container first-boot mode only; CONTRACT-012 for how
-`source_ip` is derived and which address §3's per-IP throttle counts. All
+`source_ip` is derived and which address §3's per-IP throttle counts (carried
+forward by CONTRACT-013 after CONTRACT-012's retirement, 2026-10-29). All
 other sections remain in force.
 
 ## Purpose

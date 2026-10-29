@@ -2,6 +2,7 @@
 // Shared pre-start checks for start.sh and start.ps1. Run from the repository
 // root with: node --env-file=.env scripts/startup-check.js
 
+const containerMode = process.env.BT_CONTAINER_MODE === '1';
 const { existsSync } = require('node:fs');
 const { networkInterfaces } = require('node:os');
 const { isIP } = require('node:net');
@@ -50,12 +51,13 @@ async function check() {
     ({ createSecretsStore } = require('../dist/secrets.js'));
     require('../dist/index.js');
   } catch {
-    throw new Error('Dependencies or compiled files are missing/incompatible. Run npm ci and npm run build.');
+    throw new Error(containerMode ? 'Dependencies or compiled files are missing/incompatible. Rebuild the container image.' : 'Dependencies or compiled files are missing/incompatible. Run npm ci and npm run build.');
   }
   const config = loadConfig(process.env);
-  printClientDnsHint(config.issuer);
+  if (containerMode) console.log(`Clients reach ${config.issuer} through Cloudflare Tunnel.`);
+  else printClientDnsHint(config.issuer);
   if (!existsSync(config.pgliteDataDir)) {
-    throw new Error('Database is missing. Run npm run seed as the service user before starting.');
+    throw new Error(containerMode ? 'Database is missing. Check the /data mount and seed inputs in the app configuration, then restart the app.' : 'Database is missing. Run npm run seed as the service user before starting.');
   }
   await prepareDataDirectory(config.pgliteDataDir);
   const handle = await openDatabase(config.pgliteDataDir);
@@ -63,14 +65,14 @@ async function check() {
     const store = createSecretsStore(handle.database, config.dbEncryptionKey);
     try {
       await store.getCurrentSigningKey();
-      if (!config.localLogin) await store.getSecret('CLIENT_SECRET');
+      if (containerMode || !config.localLogin) await store.getSecret('CLIENT_SECRET');
     } catch {
-      throw new Error('Required signing key or Entra secret is missing or cannot be decrypted. Check DB_ENCRYPTION_KEY; for incomplete bootstrap run npm run seed as the service user.');
+      throw new Error(containerMode ? 'Required signing key or secret is missing or cannot be decrypted. Check DB_ENCRYPTION_KEY and seed inputs in the app configuration, then restart the app.' : 'Required signing key or Entra secret is missing or cannot be decrypted. Check DB_ENCRYPTION_KEY; for incomplete bootstrap run npm run seed as the service user.');
     }
     if (config.localLogin) {
       const result = await handle.database.query('SELECT 1 FROM local_users WHERE is_active = true LIMIT 1');
       if (result.rows.length === 0) {
-        throw new Error('Local login requires an active user. Run npm run seed for first-user setup, or enable an existing user using the admin API.');
+        throw new Error(containerMode ? 'Local login requires an active user. Supply first-user inputs if unseeded, or enable an existing user using the admin API; restart the app.' : 'Local login requires an active user. Run npm run seed for first-user setup, or enable an existing user using the admin API.');
       }
     }
   } finally {

@@ -1,6 +1,6 @@
 # CONTRACT-012: Cloudflare Tunnel ingress and trusted client address
 
-Status: Approved
+Status: Retired
 Approved by: Patrick
 Approved date: 2026-10-28
 Related tasks: TASK-029 (trusted client address), TASK-025 (container
@@ -23,7 +23,7 @@ Supersedes:
 
 All other behavior in CONTRACT-003, CONTRACT-005, CONTRACT-008, CONTRACT-009
 and CONTRACT-011 remains in force.
-Superseded by:
+Superseded by: CONTRACT-013 (in full; approved by Patrick 2026-10-29)
 
 ## Purpose
 

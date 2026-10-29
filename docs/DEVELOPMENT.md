@@ -2,7 +2,8 @@
 
 ## Technology stack
 
-- Node.js with TypeScript.
+- Node.js >=22.12.0 with TypeScript (validated on Node 22; the minimum supports
+  the existing CommonJS imports of the ESM-only `jose` dependency).
 - Node.js's built-in HTTP server and environment-file support.
 - PGlite (`@electric-sql/pglite`) for the embedded PostgreSQL-compatible data
   store.
@@ -404,9 +405,25 @@ absent, verifies an existing directory is mode `0700` and owned by the running
 user, acquires a single-process lock, opens PGlite, and applies the idempotent
 schema migration before listening. Existing directories with different mode or
 ownership are rejected with a corrective `chmod` or `chown` message; the service
-does not modify their permissions or ownership automatically. A lock left after
-an unclean process termination must be removed manually after confirming no
-other service process is using the directory.
+does not modify their permissions or ownership automatically. On POSIX, a Unix-domain liveness socket in the data directory identifies the
+holder across PID namespaces. A refused connection triggers logged stale-lock
+recovery, including after SIGKILL. A live or paused holder is never displaced.
+Exclusive publication of a complete lock record and a recovery guard keyed to
+the old holder identity arbitrate simultaneous starters. Interrupted guards use
+the same recovery protocol. Probes are logged and bounded to one second each;
+at most eight nested interrupted guards are inspected (nine seconds maximum
+of probe waits), then startup refuses with manual-recovery guidance.
+
+The full socket path must fit 103 UTF-8 bytes, including the 46-byte generated
+filename and separator. Long checkout paths may need a shorter data directory
+(e.g. `/var/lib/btauth`). Local storage through one host kernel is required;
+NFS/SMB and multi-host data sharing are unsupported. Legacy PID-only locks,
+missing socket files, unreadable records and uncertain probes fail closed:
+stop **every** instance before removing the relative lock filename named in
+the error. Never delete a live lock/socket. Orphan `.bt-*.tmp` or socket files
+from a kill before publication can be removed with all instances stopped.
+Windows retains exclusive-create PID locks and manual stale-lock removal;
+its launcher and ACL behavior are unchanged.
 
 ## Console monitoring
 
@@ -445,8 +462,8 @@ runtime, dependencies, compiled modules, configuration, database permissions
 and lock, and decryptability of the current signing key. Entra mode also checks
 the stored CLIENT_SECRET; local mode requires at least one active local user.
 Database checks use the existing migration and locking code, then close the
-database before starting the application. It does not install, build, seed,
-repair permissions, or delete stale locks. Rebuild after source updates.
+database before starting the application. It does not install, build, seed, or repair permissions. The shared database
+code recovers provably stale POSIX locks as described above. Rebuild after source updates.
 
 The launcher replaces itself with Node so systemd delivers shutdown signals
 directly. Failures go to the journal with setup guidance; inspect them using
@@ -634,3 +651,150 @@ Document required test levels, coverage expectations, fixtures, and manual check
 ## Security and privacy
 
 Document secrets handling, data classification, dependency, and reporting rules.
+
+## Container deployment: TrueNAS SCALE and Cloudflare Tunnel (TASK-025)
+
+The target is TrueNAS SCALE 25.10.0.1, Custom App **Install via YAML**,
+with the app and the official `cloudflare/cloudflared` connector. The image
+uses Node 22 Bookworm slim. It builds with `npm ci` then `npm run build`
+(including `dist/console/`), installs production dependencies in a separate
+runtime stage, and defaults to UID:GID `568:568`. No image is published by this
+repository. Build from this checkout on the deployment host, or transfer a
+locally built image with Docker's save/load workflow. Both upstream image tags
+are moving tags: record the resolved digests when validating a release.
+
+### Host storage and operator configuration
+
+1. Create an empty directory/dataset on storage local to the TrueNAS host.
+   Set its ownership to `568:568` and mode `0700`, for example
+   `chown 568:568 <host-path>` and `chmod 700 <host-path>`. Remove extended
+   POSIX/NFSv4 ACL entries granting other principals access. The app checks
+   mode bits and UID, not extended ACLs. Never share this path with another
+   app. A dedicated non-root UID is also supported: set compose `user:` (or
+   `BT_UID`/`BT_GID`) and the host directory ownership to match.
+2. Supply `BT_DATA_HOST_PATH` as that existing absolute host path. The bind
+   definition refuses to create a missing host directory. The only supported
+   in-container path is `PGLITE_DATA_DIR=/data`. UID 0, another path, a missing
+   mount, and wrong ownership/mode refuse startup. The entrypoint never
+   changes ownership or permissions. There is deliberately **no `VOLUME
+   /data` declaration**: Docker must not silently create anonymous storage.
+   `/data` in the image is root-owned `0700`, and a Linux mountinfo check also
+   requires an actual mount at `/data` before seeding.
+3. Supply every-start environment variables: `DB_ENCRYPTION_KEY` (64 lowercase
+   hex characters), `EMERGENCY_ROTATION_TOKEN` and `LOCAL_USER_ADMIN_TOKEN`
+   (separate credentials, each at least 32 characters), and `LOCAL_LOGIN`
+   (`true` or `false`). Entra mode also needs `TENANT_ID` and `CLIENT_ID`.
+   Keep the encryption key outside the data dataset and its backups; do not
+   regenerate it for existing data. Optional throttle variables described
+   above can be added to the app's `environment` mapping.
+4. On first boot, also supply `CLIENT_SECRET`, `INITIAL_LOCAL_USER_USERNAME`,
+   `INITIAL_LOCAL_USER_EMAIL` and `INITIAL_LOCAL_USER_PASSWORD`, even in
+   local-login mode. Username is trimmed/lowercased, then must match
+   `[a-z0-9._-]{3,64}`; email must be valid and at most 254 characters;
+   password must be at least 12 characters. All needed inputs are validated
+   before writing any seed rows. Only missing pieces are created, so an
+   interrupted bootstrap can finish on the next start.
+5. Supply the existing tunnel's token as the connector's `TUNNEL_TOKEN`
+   environment variable. Never put it in a Dockerfile, build argument, CLI
+   argument, tracked YAML or other repository file. No `*_FILE` input channel
+   exists: Patrick's OQ-1 answer overrides CONTRACT-008's draft file channels.
+
+All these secrets are environment inputs. They are visible to authorized
+readers of `docker inspect`, TrueNAS app configuration, process environments,
+and potentially configuration exports/debug bundles. This exposure is the
+accepted OQ-1 tradeoff. After the first successful boot, remove
+`CLIENT_SECRET` and `INITIAL_LOCAL_USER_PASSWORD` from the app configuration;
+remove username/email too when no longer needed. Remove their YAML environment
+entries as well if you want no warning for empty-but-still-set values. Every
+subsequent start ignores inputs for already-seeded pieces, warns with the
+variable names (never values), and says changing them has no effect. These
+inputs cannot rotate stored credentials. A reinstall with empty storage needs
+them again. Persistent keys and admin tokens remain required on every start.
+
+### Build and install via YAML
+
+The checked-in `docker-compose.yml` is a template with operator-supplied
+`${VARIABLE}` references. For a local compose invocation, export the variables
+in the invoking environment; run `docker compose build`, then
+`docker compose up -d`. Do not enable the tunnel's public hostname until the
+Access policy below is in place.
+
+For TrueNAS, prepare a **private deployment copy outside the repository**.
+Replace the interpolation expressions with the operator's values in that copy
+(including an absolute checkout path for `build.context`, because `.` in the
+TrueNAS app directory is not this checkout). Quote YAML strings, and escape
+literal dollar signs as `$$` for Compose. Do not assume your interactive shell's
+environment is inherited by the TrueNAS middleware. Paste the private copy into
+Apps → Discover → Install via YAML and name/install the app. If loading a
+prebuilt image instead, remove `build` from the private copy, retain the loaded
+image name, and set `pull_policy: never` for the app. Protect that private YAML
+and TrueNAS configuration as secrets. See the
+[TrueNAS custom-app instructions](https://apps.truenas.com/managing-apps/installing-custom-apps/).
+This workflow still needs operator validation on 25.10.0.1.
+
+The entrypoint explicitly establishes `BT_CONTAINER_MODE=1`, runs
+`node scripts/seed.js --non-interactive`, then `node scripts/startup-check.js`,
+then replaces itself with `node dist/index.js`. It never reads `.env` or calls
+`start.sh`. Automatic seeding returns 0 for already-seeded data; the plain CLI
+retains its non-zero result and read-then-unlink file flags. Startup checks
+verify the stored secret and signing key can be decrypted. Health checks request
+`GET /health` over loopback without opening another database handle. SIGTERM
+reaches the running Node server; Docker's default stop grace period applies.
+The restart policy is `unless-stopped`.
+
+### Cloudflare configuration before exposure
+
+1. In Cloudflare Zero Trust, add a self-hosted Access application for
+   `orca.biztechro.com/admin/*` and an Allow policy limited to the intended
+   operators. This covers the console/assets, user API, `/admin/session`,
+   reset-password page and emergency rotation. Configure this **before**
+   enabling the public hostname. See
+   [Cloudflare's Access setup](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/).
+2. In the existing tunnel's public hostname/published application routes,
+   configure `orca.biztechro.com` → HTTP service `http://app:3210`.
+   The connector uses `TUNNEL_TOKEN` with `tunnel --no-autoupdate run`; see
+   [tunnel run parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/).
+3. In the `biztechro.com` zone's SSL/TLS → Edge Certificates, enable
+   [Always Use HTTPS](https://developers.cloudflare.com/ssl/edge-certificates/additional-options/always-use-https/).
+   Keep `SERVICE_ISSUER=https://orca.biztechro.com` and `COOKIE_SECURE=true`,
+   as shipped. The Entra redirect URI remains
+   `https://orca.biztechro.com/auth/callback`.
+4. Leave `/auth/*`, `/.well-known/jwks.json`, `/health`, `/api/*`, `/docs`
+   and `/openapi.json` outside Access. Consuming servers must fetch JWKS
+   without an interactive Cloudflare login. Scripts calling admin endpoints
+   need a Cloudflare Access service token (`CF-Access-Client-Id` and
+   `CF-Access-Client-Secret`, with a Service Auth policy) **as well as** the
+   service's existing bearer token. Access does not replace app authorization.
+
+CONTRACT-012 §4 invariants: **no compose service publishes a host port**;
+only the app and connector join the dedicated `172.30.10.0/29` network;
+`TRUSTED_PROXIES` covers only that subnet. If it conflicts with a host network,
+change both the subnet and `TRUSTED_PROXIES` together in the private deployment
+copy. Publishing Node's port or adding another container to the trusted network
+could allow forged `CF-Connecting-IP` values. Do neither. The bridge has outbound
+connectivity for the tunnel; it is not an `internal: true` network. All clients,
+including LAN clients, use Cloudflare; internet/tunnel failure makes the service
+unreachable. TASK-029 must be accepted before enabling traffic.
+
+### Validation and operational checks
+
+Run `npm run build` and `node scripts/test-container-deployment.js` on Node 22.
+The latter uses scratch data outside the repository, validates seed behavior,
+container guards, real POSIX lock races/SIGSTOP/SIGKILL, real HTTP health and
+SIGTERM, persistence after a crash, and the existing offline verifier. It does
+not validate Docker, TrueNAS, Windows or a real tunnel. Run all existing
+`scripts/test-*.js` as regression checks too.
+
+On a Docker host, validate non-root identity, first boot/restart,
+`docker compose down`/`up` persistence, SIGKILL recovery, paused/concurrent
+container refusal, UID 0/wrong path/missing mount rejection, and clean
+`docker stop`. Inspect `docker history --no-trunc` and saved image layers for
+secret material. Use throwaway environment values and scratch host storage;
+keep temporary port mappings out of the shipped compose file.
+
+Before go-live, the operator must verify through the real tunnel: health;
+console and its three assets; console sign-in/sign-out/user management at the
+HTTPS hostname; Access required on `/admin/*` but not sign-in/JWKS; two clients'
+public addresses recorded separately; and a forged `CF-Connecting-IP` unable
+to change the recorded address. Confirm no app port is open on TrueNAS.
+These checks are pending, not implied by the isolated test suite.

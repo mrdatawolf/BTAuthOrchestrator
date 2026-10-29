@@ -1,0 +1,56 @@
+# Operator: supply the interpolation variables through the deployment
+# environment / TrueNAS configuration, never by committing their values.
+# For TrueNAS Install via YAML, use an absolute checkout path for BT_BUILD_CONTEXT.
+services:
+  app:
+    image: btauthorchestrator:local
+    build:
+      context: ${BT_BUILD_CONTEXT:-.}
+    user: "${BT_UID:-568}:${BT_GID:-568}"
+    restart: unless-stopped
+    environment:
+      BT_CONTAINER_MODE: "1"
+      PORT: "3210"
+      PGLITE_DATA_DIR: /data
+      TRUSTED_PROXIES: 172.30.10.0/29
+      SERVICE_ISSUER: https://orca.biztechro.com
+      COOKIE_SECURE: "true"
+      LOCAL_LOGIN: ${LOCAL_LOGIN:?Set LOCAL_LOGIN to true or false}
+      TENANT_ID: ${TENANT_ID:-}
+      CLIENT_ID: ${CLIENT_ID:-}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?Supply the persistent encryption key}
+      EMERGENCY_ROTATION_TOKEN: ${EMERGENCY_ROTATION_TOKEN:?Supply a dedicated emergency token}
+      LOCAL_USER_ADMIN_TOKEN: ${LOCAL_USER_ADMIN_TOKEN:?Supply a separate user-admin token}
+      ALLOW_NEW_LOCAL_LOGIN_CREATION: ${ALLOW_NEW_LOCAL_LOGIN_CREATION:-false}
+      # Required only while the corresponding database piece is unseeded.
+      CLIENT_SECRET: ${CLIENT_SECRET:-}
+      INITIAL_LOCAL_USER_USERNAME: ${INITIAL_LOCAL_USER_USERNAME:-}
+      INITIAL_LOCAL_USER_EMAIL: ${INITIAL_LOCAL_USER_EMAIL:-}
+      INITIAL_LOCAL_USER_PASSWORD: ${INITIAL_LOCAL_USER_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ${BT_DATA_HOST_PATH:?Supply an existing absolute host path owned by the runtime UID}
+        target: /data
+        bind:
+          create_host_path: false
+    networks:
+      - tunnel
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Supply the existing Cloudflare tunnel token}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - tunnel
+# Only these two services may join. Do not publish ports on either service.
+# Not internal:true: cloudflared needs outbound internet connectivity.
+networks:
+  tunnel:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.10.0/29

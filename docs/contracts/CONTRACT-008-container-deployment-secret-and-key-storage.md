@@ -19,7 +19,11 @@ first-boot path only.
 Superseded by: CONTRACT-012 for the reverse-proxy actor, the Preconditions
 bullet and Interfaces "Ingress" line naming the reverse proxy, §8, the Caddy
 scope exclusions, OQ-9's deferral and Resolved decision #21 (Cloudflare
-Tunnel replaces Caddy). All other sections remain in force.
+Tunnel replaces Caddy); these supersessions are carried forward by
+CONTRACT-013 after CONTRACT-012's retirement (2026-10-29). CONTRACT-014
+(approved 2026-10-29) for the container sections listed in its header,
+including the Preconditions bullet and Interfaces "Ingress" line above.
+All other sections remain in force.
 
 ## Purpose
 

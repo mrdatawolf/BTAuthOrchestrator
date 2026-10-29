@@ -1,5 +1,6 @@
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
+import { constants as osConstants } from "node:os";
 
 export function isContainerMode(): boolean {
   return process.env.BT_CONTAINER_MODE === "1";
@@ -9,9 +10,15 @@ export function containerStorageFix(): string {
   return `The app (UID ${process.getuid?.()}, GID ${process.getgid?.()}) cannot write to /data. In the app's Storage settings for /data, tick Enable ACL and add an entry: User, ID ${process.getuid?.()}, Modify. Then save the app.`;
 }
 
+export function containerDirectoryCreationError(code: unknown): string {
+  // Report only recognized OS error codes, never arbitrary error text or input.
+  const errorCode = typeof code === "string" && Object.hasOwn(osConstants.errno, code) ? code : "UNKNOWN";
+  return `Could not create /data/pglite (error code: ${errorCode}). Check the app's storage for available space, quota limits and read-only status, then restart the app.`;
+}
+
 export function containerDirectoryError(kind: "file" | "owner" | "mode", value?: number): string {
   if (kind === "owner") return `/data/pglite belongs to UID ${value}, but the app runs as UID ${process.getuid?.()} (GID ${process.getgid?.()}). In the app's Security Context, enable the custom user and set User ID back to ${value}, or in Storage give the app a new, empty /data ix volume.`;
-  if (kind === "mode") return `/data/pglite has mode ${value!.toString(8).padStart(4, "0")} but must be 0700. Something outside the app changed it. Fix it from the TrueNAS Shell (chmod 700 on the app's /data/pglite folder), or restore a snapshot of the app's volume in Storage.`;
+  if (kind === "mode") return `/data/pglite has mode ${value!.toString(8).padStart(4, "0")} but must be 0700. Something outside the app changed it. Fix it from the TrueNAS Shell (chmod 700 on the app's /data/pglite folder), or restore a snapshot of the app's volume.`;
   return "/data/pglite is not a directory. In the app's Storage settings, restore a snapshot containing the directory or give the app a new, empty /data ix volume.";
 }
 

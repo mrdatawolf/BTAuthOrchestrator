@@ -63,9 +63,9 @@ export function withIngressAdmission(
       if (!state && refusals.size >= MAX_REFUSAL_PEERS) {
         // Only expire entries whose quiet period has elapsed. Never evict an
         // active entry: that could let a peer log again inside its interval.
-        // Keep pending suppressed counts until their next reported line.
+        // Drop pending counts on expiry so stale peers cannot exhaust capacity.
         for (const [address, entry] of refusals) {
-          if (entry.suppressed === 0 && time - entry.last >= REFUSAL_INTERVAL) refusals.delete(address);
+          if (time - entry.last >= REFUSAL_INTERVAL) refusals.delete(address);
         }
       }
       if (!state && refusals.size < MAX_REFUSAL_PEERS) {
@@ -97,7 +97,7 @@ export function withIngressAdmission(
         ? `Ingress warning: peer=${address}; this looks like a tunnel install missing TRUSTED_PROXIES. Every tunnel user is being recorded under the connector's address; proxy-only mode is off.`
         : `Ingress warning: peer=${address}; the connector's address may have changed. Check TRUSTED_PROXIES.`);
     }
-    if (request.headers.expect !== undefined) {
+    if (request.httpVersion === "1.1" && request.headers.expect !== undefined) {
       if (request.headers.expect.toLowerCase() === "100-continue") response.writeContinue();
       else {
         response.writeHead(417);

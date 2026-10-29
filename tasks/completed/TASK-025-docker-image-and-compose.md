@@ -263,6 +263,40 @@ acceptance remain pending.
 paragraph; this handoff. Task moved to review, not accepted.
 
 
+### Rework (2026-10-29)
+
+- Changes: resolved QA minor findings 2 and 4 only. Wrong-mode wording now
+  matches CONTRACT-014 exactly, preserving the detected octal mode and removing
+  "in Storage". Container mkdir keeps EEXIST's file error; only EACCES/EPERM
+  get Enable ACL advice. Other failures abort with: "Could not create
+  /data/pglite (error code: CODE). Check the app's storage for available space,
+  quota limits and read-only status, then restart the app."
+- Evidence: existing filesystem stubs now cover EACCES, EPERM, ENOSPC, EDQUOT,
+  EROFS, EIO, missing/unrecognized codes, exit 1, no directory creation, no ACL
+  advice for non-permission errors, no secret output, and exact wrong-mode text.
+- Validation: all Node/npm commands used
+  `export PATH=/home/patrick/.nvm/versions/node/v22.22.3/bin:$PATH`.
+  `node --version` reported v22.22.3; `node node_modules/typescript/bin/tsc`
+  passed to refresh dist before the first test. Then
+  `node scripts/test-container-deployment.js` passed, followed by
+  `npm run build` and every test below (each exit 0):
+  `node scripts/test-admin-console.js`, `node scripts/test-api-docs.js`,
+  `node scripts/test-console-sign-in.js`, `node scripts/test-container-deployment.js`,
+  `node scripts/test-local-password-change.js`, `node scripts/test-local-registration.js`,
+  `node scripts/test-proxy-only.js`, `node scripts/test-trusted-proxies.js`.
+  `git diff --check` and a Python exact-text comparison against whitespace-normalized
+  CONTRACT-014 passed. Logs: `/tmp/task025-rework-*.log`; per-test results:
+  `/tmp/task025-rework-results.txt`. No TASK-032 test failure observed.
+- Assumptions/deviations: no prescribed non-permission mkdir wording exists;
+  use the short storage message above. Only recognized OS error codes are
+  printed; absent/unrecognized codes become UNKNOWN to avoid echoing input.
+  Non-container behavior, contracts, acceptance criteria and TASK-032 files
+  are unchanged by this rework. Other QA findings remain accepted follow-ups.
+- Remaining risks: injected errors prove handling, not real Docker/TrueNAS
+  storage behavior; existing TASK-033/034 validation remains outstanding.
+  Handoff updated after validation; moved to review, not accepted. No commit.
+
+
 ## Previous implementation handoff (compose design, superseded 2026-10-29)
 
 Task: TASK-025
@@ -418,4 +452,116 @@ Docker and operator validation checklist.
 
 ## Review
 
-Not reviewed.
+### QA review
+
+Reviewer: QualityAssurance (independent), 2026-10-29. Reviewed the working
+tree against 91add8e (`Dockerfile`, deleted `docker-compose.yml`,
+`src/container.ts`, `src/database.ts`, `scripts/startup-check.js`,
+`scripts/test-container-deployment.js`, `scripts/test-trusted-proxies.js`,
+`docs/DEVELOPMENT.md`) against CONTRACT-014 (§7.1-§7.3, Failure behavior,
+Validation) and CONTRACT-008 §5.
+
+**Outcome: Pass** (no blocking or should-fix findings; minors below).
+
+Validation run by the reviewer (Node v22.22.3): `npm run build` passed; all
+eight `scripts/test-*.js` exited 0. Docker was not available, so no image
+build was attempted. The base-image digest was not independently
+re-resolved; the handoff's registry check is recorded evidence only.
+
+Verified as conforming:
+
+- **Storage checks.** The mountinfo `/data` check runs before anything is
+  written. `/data` must be a directory with `access(W_OK|X_OK)`. No probe
+  file is created, and there is no chmod or chown of `/data`.
+  `/data/pglite` is created at 0700 (mkdir mode; umask cannot widen it).
+  When it already exists, the owner is checked before the mode, and nothing
+  is ever narrowed or chowned.
+- **Failure cases.** A file at the path, a foreign owner, mode 0755, UID 0,
+  and `PGLITE_DATA_DIR` set to `/data` or `/elsewhere` each fail closed.
+- **Messages.** Container messages name Storage, Security Context or
+  Environment Variables, use the numeric UID/GID, and contain no shell or
+  host path except the wrong-mode message.
+- **Inputs.** `*_FILE` variables supply nothing. CLIENT_SECRET is required
+  in non-interactive seed whatever LOCAL_LOGIN is (`src/seed.ts:100-113`).
+- **Dockerfile.** Both stages are digest-pinned. `PORT=3210`,
+  `PGLITE_DATA_DIR=/data/pglite`, container mode, `USER 568:568`,
+  root-owned image `/data`, no `VOLUME`, OCI source/version/revision/
+  licenses (MIT matches LICENSE), and the healthcheck uses `$PORT` on
+  127.0.0.1.
+- **Docs.** No compose, YAML or `BT_BUILD_CONTEXT` remains outside
+  historical records. The docs cover both profile tables, the three
+  easy-to-miss settings, removing first-boot inputs, the exposure tradeoff,
+  the ix-volume deletion warning, an off-box key copy, and the Cloudflare
+  route and Access steps.
+
+**`access()` assessment: adequate.** In a container, the real and effective
+UID are the same. Linux `access()` goes through `inode_permission`, which
+ZFS uses to evaluate NFSv4 ACLs, and it returns EROFS on read-only mounts. It
+cannot leave anything behind, which a probe write could. Leftover gaps
+(quota or full disk, a later ACL change) still fail closed at mkdir or
+database open.
+
+**Interaction with TASK-032.** The image healthcheck reaches the server as
+`::ffff:127.0.0.1` GET `/health`, which the proxy-only gate admits. Seed and
+startup-check load config, so a bad PROXY_ONLY fails at the seed step with
+the Configuration error. The mode line is logged only by `dist/index.js`,
+before listening. The fixture change in `test-trusted-proxies.js`
+(192.0.2.0/29) does not affect behavior.
+
+Findings (all minor):
+
+1. **The PGLITE_DATA_DIR message does not say what was found.**
+   `src/container.ts:26`. §7.3 says messages should state what was found,
+   and the proposed wording echoes the value ("is set to /elsewhere"). This
+   is a deliberate choice not to echo input. Failure scenario: an operator
+   with a typo cannot see the bad value in the log. Recommended: echo the
+   value (it is not secret) or record the deviation.
+2. **The wrong-mode message adds an inaccurate location.**
+   `src/container.ts:14` appends "in Storage" to "restore a snapshot of the
+   app's volume". In TrueNAS, snapshots are restored from Datasets/Data
+   Protection, not from the app's Storage settings, so the operator is sent
+   to the wrong screen. Recommended: use the contract's wording exactly.
+3. **An empty `PGLITE_DATA_DIR` gives the wrong hint.** If the operator adds
+   `PGLITE_DATA_DIR` with an empty value in the form, it overrides the image
+   default. The result is the generic "missing PGLITE_DATA_DIR"
+   Configuration error, which suggests setting a value rather than removing
+   the variable (§7.1 "Any other value fails startup closed ... remove").
+   Recommended: in container mode, map empty to the "remove the variable"
+   message.
+4. **All non-EEXIST mkdir errors are reported as an ACL problem.**
+   `src/database.ts:122-125`. ENOSPC or EDQUOT on a full volume would tell
+   the operator to tick Enable ACL. Recommended: keep the ACL message for
+   EACCES/EPERM/EROFS only, and give a generic storage message otherwise.
+5. **Build-argument defaults can mislabel the image.** `Dockerfile:12-13`:
+   `ARG VERSION=0.9.0` and an empty `REVISION` mean any build without build
+   args is labelled 0.9.0 with no revision. Recommended: TASK-033 CI must
+   pass both, or drop the default.
+6. **Tests stub permission failures.** `scripts/test-container-deployment.js`
+   simulates an unwritable `/data` by making the stubbed `access()` throw,
+   and a foreign owner by patching `stat().uid`. Real ACL and ownership
+   behavior is left to TASK-033 and TASK-034, which is acceptable given
+   Phase 0 check A.
+
+Residual risk: image build and run, real mount namespace and NFSv4 ACL
+behavior are unverified locally (TASK-033 and TASK-034). Environment secret
+exposure and ix-volume deletion are accepted risks.
+
+Recommended next transition: human acceptance from `review/` to
+`completed/`, with findings 1-5 as optional follow-ups.
+
+### Returned to in-progress (Patrick, 2026-10-29)
+
+Patrick accepted the QA recommendation to fix before acceptance. Rework
+scope, limited to these items:
+
+1. QA minor finding 2: the wrong-mode message in `src/container.ts` must
+   match CONTRACT-014's text ("...Fix it from the TrueNAS Shell (chmod 700
+   on the app's /data/pglite folder), or restore a snapshot of the app's
+   volume.") without the added "in Storage".
+2. QA minor finding 4: in `src/database.ts` (around lines 122-125), only
+   permission errors (EACCES/EPERM) creating `/data/pglite` get the Enable
+   ACL advice; other errors (e.g. ENOSPC, EDQUOT, EROFS) get an accurate
+   message that still fails closed. Add or adjust tests.
+
+Other QA minor findings stay as accepted follow-ups. Update the
+implementation handoff and move the task to `review/` when done.

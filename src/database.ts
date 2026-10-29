@@ -2,7 +2,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { acquireProcessLock } from "./processLock.js";
-import { checkContainerStorage, isContainerMode, containerDirectoryError, containerStorageFix } from "./container.js";
+import { checkContainerStorage, isContainerMode, containerDirectoryError, containerDirectoryCreationError, containerStorageFix } from "./container.js";
 
 import { PGlite } from "@electric-sql/pglite";
 
@@ -120,8 +120,10 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
     await mkdir(dataDirectory, { mode: REQUIRED_DIRECTORY_MODE, recursive: true });
   } catch (error) {
     if (isContainerMode()) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(containerDirectoryError("file"));
-      throw new Error(containerStorageFix());
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") throw new Error(containerDirectoryError("file"));
+      if (code === "EACCES" || code === "EPERM") throw new Error(containerStorageFix());
+      throw new Error(containerDirectoryCreationError(code));
     }
     throw new Error(
       `Data directory error for ${dataDirectory}: unable to create directory with mode 0700: ${errorMessage(error)}`,

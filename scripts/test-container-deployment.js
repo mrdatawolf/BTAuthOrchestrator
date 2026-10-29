@@ -75,6 +75,11 @@ async function main() {
       process.getuid = () => Number(process.env.TEST_UID || ${process.getuid()});
       for (const k of ['stat','mkdir','access']) fs[k] = async (p,...args) => {
         if (k === 'access' && process.env.TEST_UNWRITABLE) throw new Error('denied');
+        if (k === 'mkdir' && p === '/data/pglite' && process.env.TEST_MKDIR_ERROR) {
+          const error = new Error('secret-error-text');
+          if (process.env.TEST_MKDIR_ERROR !== 'missing') error.code = process.env.TEST_MKDIR_ERROR;
+          throw error;
+        }
         const result = await original[k](map(p),...args);
         if (k === 'stat' && p === '/data/pglite' && process.env.TEST_OWNER) result.uid = Number(process.env.TEST_OWNER);
         return result;
@@ -103,7 +108,7 @@ async function main() {
       const result = prepare(overrides);
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, pattern);
-      assert.match(result.stderr, /Storage|Security Context|Environment Variables/);
+      if (!modeException) assert.match(result.stderr, /Storage|Security Context|Environment Variables/);
       if (!modeException) assert.doesNotMatch(result.stderr, /chown|chmod|setfacl|\.env|npm run seed|start\.sh|host.path|\/tmp\//i);
     };
     fail({ TEST_NO_MOUNT: '1' }, /No storage is mounted.*Mount Path \/data/);
@@ -112,7 +117,11 @@ async function main() {
     fail({ TEST_OWNER: '9876' }, /belongs to UID 9876.*User ID back to 9876/);
     for (const path of ['/data', '/elsewhere']) fail({ PGLITE_DATA_DIR: path }, /Remove the PGLITE_DATA_DIR environment variable/);
     await fs.chmod(join(mountedData, 'pglite'), 0o755);
+    const wrongModeText = "/data/pglite has mode 0755 but must be 0700. Something outside the app changed it. Fix it from the TrueNAS Shell (chmod 700 on the app's /data/pglite folder), or restore a snapshot of the app's volume.";
     fail({}, /mode 0755.*0700.*TrueNAS Shell/, true);
+    const wrongMode = prepare({});
+    assert.equal(wrongMode.stderr.trim(), wrongModeText);
+    assert.doesNotMatch(wrongMode.stderr, /in Storage/);
     assert.equal((await fs.stat(join(mountedData, 'pglite'))).mode & 0o777, 0o755);
     await fs.rmdir(join(mountedData, 'pglite'));
     await fs.writeFile(join(mountedData, 'pglite'), 'preserved');
@@ -121,6 +130,18 @@ async function main() {
     await fs.unlink(join(mountedData, 'pglite'));
     fail({ TEST_UNWRITABLE: '1' }, /cannot write/);
     assert.deepEqual(await fs.readdir(mountedData), []);
+    for (const code of ['EACCES', 'EPERM']) {
+      fail({ TEST_MKDIR_ERROR: code }, /cannot write.*Enable ACL.*Modify/);
+      assert.deepEqual(await fs.readdir(mountedData), []);
+    }
+    for (const code of ['ENOSPC', 'EDQUOT', 'EROFS', 'EIO', 'missing', 'secret-code-value']) {
+      const result = prepare({ TEST_MKDIR_ERROR: code, CLIENT_SECRET: 'secret-env-value' });
+      assert.equal(result.status, 1, result.stderr);
+      const reportedCode = ['missing', 'secret-code-value'].includes(code) ? 'UNKNOWN' : code;
+      assert.equal(result.stderr.trim(), `Could not create /data/pglite (error code: ${reportedCode}). Check the app's storage for available space, quota limits and read-only status, then restart the app.`);
+      assert.doesNotMatch(result.stderr, /Enable ACL|secret-error-text|secret-code-value|secret-env-value/);
+      assert.deepEqual(await fs.readdir(mountedData), []);
+    }
     console.log('PASS: container storage creation, unchanged parent permissions, all form failures and no probe residue (filesystem boundary redirected)');
 
     if (process.platform !== 'win32') {

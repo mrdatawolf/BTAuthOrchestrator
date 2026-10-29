@@ -127,6 +127,20 @@ async function main() {
   time += 60000;
   await request(bounded, '11.0.0.1');
   assert.equal(flood.length, MAX_REFUSAL_PEERS + 1);
+  // Saturation must recover even when every tracked peer has a pending count.
+  const pendingLines = [];
+  const pending = withIngressAdmission(() => {}, proxy, { now: () => time, warn: line => pendingLines.push(line) });
+  for (let i = 0; i < MAX_REFUSAL_PEERS; i++) {
+    const peer = `10.1.${i >> 8}.${i & 255}`;
+    await request(pending, peer);
+    await request(pending, peer);
+  }
+  await request(pending, '192.168.2.99');
+  assert.equal(pendingLines.length, MAX_REFUSAL_PEERS);
+  time += 60001;
+  await request(pending, '192.168.2.99');
+  assert.equal(pendingLines.length, MAX_REFUSAL_PEERS + 1);
+  assert.match(pendingLines.at(-1), /peer=192\.168\.2\.99 .*suppressed=0/);
   console.log('PASS: refusal intervals, suppressed counts, escaping, truncation and bounded peer tracking');
 
   for (const header of ['cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry', 'cdn-loop']) {
@@ -189,6 +203,45 @@ async function main() {
     }
   } finally { await new Promise(resolve => server.close(resolve)); }
   console.log('PASS: unfinished large POST receives prompt refusal and connection closure');
+
+  for (const admitted of [false, true]) {
+    let handled = 0;
+    const listener = withIngressAdmission((req, res) => {
+      handled++;
+      res.writeHead(200, { Connection: 'close' });
+      res.end('normal processing');
+    }, admitted ? config({ TRUSTED_PROXIES: '127.0.0.1' }) : proxy, { warn() {} });
+    const expectServer = createServer(listener);
+    expectServer.on('checkContinue', listener);
+    expectServer.on('checkExpectation', listener);
+    await new Promise(resolve => expectServer.listen(0, '127.0.0.1', resolve));
+    try {
+      for (const version of ['1.0', '1.1']) {
+        for (const expectation of ['100-continue', 'foo']) {
+          const before = handled;
+          const socket = connect(expectServer.address().port, '127.0.0.1');
+          socket.setTimeout(2000, () => socket.destroy(new Error('Expect request did not close promptly')));
+          let wire = '';
+          socket.on('data', chunk => { wire += chunk; });
+          socket.write(`GET / HTTP/${version}\r\nHost: localhost\r\nConnection: close\r\nExpect: ${expectation}\r\n\r\n`);
+          await once(socket, 'close');
+          const rejectedExpectation = admitted && version === '1.1' && expectation === 'foo';
+          const status = !admitted ? 403 : rejectedExpectation ? 417 : 200;
+          assert.match(wire, new RegExp(`HTTP/1\\.1 ${status}`));
+          assert.equal(handled - before, admitted && !rejectedExpectation ? 1 : 0);
+          if (admitted && version === '1.1' && expectation === '100-continue') {
+            assert.match(wire, /^HTTP\/1\.1 100 Continue/);
+          } else {
+            assert.doesNotMatch(wire, /100 Continue/);
+          }
+          if (!rejectedExpectation) assert.doesNotMatch(wire, /417/);
+          if (status === 200) assert.ok(wire.includes('normal processing'));
+          if (status === 403) assert.ok(wire.includes(body));
+        }
+      }
+    } finally { await new Promise(resolve => expectServer.close(resolve)); }
+  }
+  console.log('PASS: HTTP/1.0 ignores Expect; HTTP/1.1 preserves admission and expectation handling');
 
   // Real native process: startup reporting precedes listening, local-only routes.
   const directory = await mkdtemp(join(tmpdir(), 'bt-proxy-only-'));

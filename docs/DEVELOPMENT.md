@@ -158,7 +158,7 @@ attempt (success or failure) writes one row to `local_login_audit`,
 best-effort — a malformed request (missing/invalid body) is rejected `400`
 before any lookup, hashing, or audit write occurs.
 
-#### Client address and `TRUSTED_PROXIES` (CONTRACT-012, TASK-029)
+#### Client address and `TRUSTED_PROXIES` (CONTRACT-013, TASK-029)
 
 The "source IP" used by the per-IP throttles and every `source_ip` audit
 column comes from `createClientAddressResolver` in `src/clientAddress.ts`:
@@ -166,7 +166,8 @@ column comes from `createClientAddressResolver` in `src/clientAddress.ts`:
 - With `TRUSTED_PROXIES` unset (the default), it is the connection's own peer
   address. `X-Forwarded-For` and `CF-Connecting-IP` are ignored, so a client
   cannot pick its own address.
-- With `TRUSTED_PROXIES` set to comma-separated addresses or CIDR ranges, a
+- With `TRUSTED_PROXIES` set to comma-separated addresses or CIDR ranges,
+  proxy-only mode turns on by default (override with `PROXY_ONLY=false`). A
   request whose peer is inside them may supply a single valid
   `CF-Connecting-IP`, which then becomes the client address. A missing,
   repeated or malformed header falls back to the peer address.
@@ -838,7 +839,10 @@ Logs explain configuration and problems without requiring access to settings:
   once per peer per 60 seconds. Paths exclude queries, escape control
   characters and truncate at 256 characters; no headers are logged.
   Missing peers use `<no-peer>`. Tracking is capped at 4,096 peers; excess
-  new peers are silently refused until expired entries free capacity.
+  new peers are refused without logging while all entries are within their
+  60-second interval. When a new peer needs capacity, stale entries expire
+  even with pending suppressed counts (those counts are dropped), allowing
+  new-peer logging to resume.
 - `Ingress warning: peer=...; this looks like a tunnel install missing
   TRUSTED_PROXIES...` explains that all tunnel users share the connector's
   address and proxy-only is off. It triggers in local-only mode upon

@@ -233,6 +233,173 @@ with `git diff -- .env.example`, a byte comparison confirming all content
 outside that block is unchanged, and whitespace checks. No wording conflicts
 or behavior changes; task remains in `tasks/review/`.
 
+### QA rework handoff (openai-coder, 2026-10-29)
+
+Changes made for Patrick's returned scope:
+
+- Finding 1: `src/ingress.ts` now expires every stale entry when a new peer
+  needs capacity in the full 4,096-peer table, regardless of pending counts.
+  Pending counts on expired entries are dropped. This is the simplest
+  authorized choice: no expiry log burst or additional state, bounded memory,
+  and no eviction before the 60-second interval ends. Retained peers still
+  report their suppressed counts normally. This supersedes the original
+  handoff's statement that pending counts are retained until reported.
+- Finding 2: Expect processing applies only to HTTP/1.1, after admission.
+  HTTP/1.0 ignores Expect and proceeds through normal processing/refusal.
+- Regression coverage in `scripts/test-proxy-only.js`: fill all 4,096 slots
+  with pending counts, verify a new peer is initially unlogged, advance
+  beyond 60 seconds, and verify that peer is logged. Raw sockets cover
+  HTTP/1.0 and HTTP/1.1 with both `100-continue` and `foo`, admitted and
+  refused: HTTP/1.0 gets no 100/417; refused HTTP/1.1 gets 403 without either;
+  admitted HTTP/1.1 still gets 100 or 417 as appropriate.
+- Finding 5: re-read `docs/DEVELOPMENT.md` immediately before editing and
+  changed only the client-address heading to CONTRACT-013, the trusted-proxy
+  default bullet, and the peer-cap explanation (including dropped counts).
+
+Validation performed on Node 22.22.3, with the requested PATH exported;
+`npm_config_cache=/tmp/npm-cache` for the build/full suite:
+
+- `./node_modules/.bin/tsc`: passed (prerequisite compilation for tests that
+  import `dist/`).
+- `node scripts/test-proxy-only.js`: passed first, before build/full suite.
+- `npm run build`: passed, including console asset copying.
+- `for test in scripts/test-*.js; do node "$test"; done`, with individual
+  output captured under `/tmp/task032-rework-<basename>.log` and each exit
+  code checked:
+  - `node scripts/test-admin-console.js`: exit 0.
+  - `node scripts/test-api-docs.js`: exit 0.
+  - `node scripts/test-console-sign-in.js`: exit 0.
+  - `node scripts/test-container-deployment.js`: exit 0.
+  - `node scripts/test-local-password-change.js`: exit 0.
+  - `node scripts/test-local-registration.js`: exit 0.
+  - `node scripts/test-proxy-only.js`: exit 0.
+  - `node scripts/test-trusted-proxies.js`: exit 0.
+- `git diff --check`: passed before handoff; scoped final whitespace check
+  and acceptance-criteria preservation check also passed after handoff.
+
+Assumptions, deviations and unresolved risks:
+
+- Dropping pending counts on stale eviction follows Patrick's explicit
+  authorization and CONTRACT-013's bounded-memory/rate-limiting allowance.
+  Counts lost on expiry are the chosen tradeoff; no unresolved contract
+  ambiguity or expanded implementation scope.
+- Findings 3 and the remaining finding 4 gaps stay accepted follow-ups.
+  Real Cloudflare/TrueNAS validation remains TASK-034's responsibility.
+- TASK-025 edits were concurrent; no validation failures occurred, including
+  its container-deployment script. None of its protected files, clientAddress,
+  contracts, or approved acceptance criteria were edited by this rework.
+- No commit created. Task moved from in-progress to review for independent
+  review and human acceptance; not marked accepted.
+
 ## Review
 
-Not reviewed.
+### QA review
+
+Reviewer: QualityAssurance (independent), 2026-10-29. Reviewed the working
+tree against 91add8e (`src/ingress.ts`, `src/config.ts`, `src/index.ts`,
+`scripts/test-proxy-only.js`, `.env.example`, `docs/DEVELOPMENT.md`)
+against CONTRACT-013 §2.0, §3, §6, §7, §8, Failure behavior and Validation.
+
+**Outcome: Human decision required** (one should-fix finding is about how to
+read the contract; no blocking defects).
+
+Validation run by the reviewer (Node v22.22.3 on PATH):
+`npm run build` passed; every `scripts/test-*.js` exited 0 (admin-console,
+api-docs, console-sign-in, container-deployment, local-password-change,
+local-registration, proxy-only, trusted-proxies). A scratch probe script
+(outside the repo) checked the gate over real sockets and the bounded
+refusal-log state.
+
+Verified as conforming: the gate wraps monitoring and routing, and is also
+wired to `checkContinue`/`checkExpectation`, so a refused `Expect` request
+gets 403 with no 100/417 first. Only the trusted peer, or loopback
+(127/8, ::1, mapped) GET/HEAD to exactly `/health`, is admitted; absolute-form
+`/health`, `?x=1` and `/health/` are refused. The 403 body and headers are
+exact, with no Set-Cookie and the connection closed. A refused request with
+an unfinished body closes promptly, and pipelined requests after a refusal
+are not served. The no-peer placeholder is used. The 60 s per-peer interval
+reports suppressed counts; paths are JSON-escaped (plus C1, U+2028/2029) and
+truncated at 256 characters, with no query string and no headers. PROXY_ONLY
+parsing (trim, case-insensitive, invalid fails, derived default, true with
+empty TRUSTED_PROXIES fails naming both) works through the aggregated
+Configuration error before listening. The mode line comes before listening
+and says set/derived. Range, Cloudflare-settings, missing-TRUSTED_PROXIES and
+drift warnings fire under the right conditions, contain no header values and
+use a 10-minute interval. CF-Connecting-IP is honoured only from trusted
+peers (`clientAddress.ts` unchanged). An admitted HTTP/1.1
+`Expect: 100-continue` still gets 100 and its body is processed (probe). The
+container healthcheck (127.0.0.1 on a dual-stack listener) is admitted.
+
+Findings:
+
+1. **Should-fix: refusal logging can be switched off for good for new
+   peers.** `src/ingress.ts:63-72`. When the map is full, only entries with
+   `suppressed === 0` that are past their interval are freed. An entry with
+   a pending suppressed count is kept until that same peer is refused again,
+   which may never happen. Probe: 4,096 peers each refused twice within 60 s,
+   then the clock advanced 24 h, then a new peer `192.168.1.99` was refused.
+   Result: 0 log lines, and no new peer is ever logged again for the life of
+   the process. Failure scenario: someone with about 4k routable source
+   addresses fills the table once. After that, the "Connector IP drifts,
+   proxy-only on" failure row ("The refusal log names the new address")
+   breaks. Every tunnel request is then refused with no log naming the
+   connector's new address, and the operator loses CONTRACT-013's UX promise
+   that logs show "which addresses are being refused". The contract allows
+   refusals to be "logged less often", but stopping new-peer logging forever
+   goes beyond that. Recommended: let stale entries expire whatever their
+   pending count (drop the count or emit it), or evict the oldest stale
+   entry. Add a test with pending counts. The human may instead accept this
+   as residual risk, since only the LAN IPv4 is published.
+2. **Minor: regression for HTTP/1.0 requests with `Expect`.**
+   `src/ingress.ts:100-105`. Node itself ignores `Expect` on HTTP/1.0
+   requests (it emits `request`), but the wrapper now acts on the header for
+   every version. Probe: HTTP/1.0 `Expect: foo` now gets 417 (it used to be
+   handled), and HTTP/1.0 `Expect: 100-continue` gets an interim
+   `HTTP/1.1 100 Continue`, which RFC 9110 §10.1.1 says a server must not
+   send to an HTTP/1.0 request. Recommended: only handle `Expect` when
+   `httpVersion === "1.1"`, matching Node.
+3. **Minor: malformed request targets get Node's 400, not the 403.** §2.0
+   says the refusal is identical for "malformed request targets". Targets
+   that llhttp rejects (for example `GET /a b c HTTP/1.1`) get Node's default
+   `400 Bad Request` from `clientError` before the gate runs (probe). No
+   handler runs and nothing leaks, so this is a wording deviation, not a
+   security problem. Recommended: either a `clientError` handler that sends
+   the fixed 403 in proxy-only mode, or the human records it as accepted.
+4. **Minor: test gaps.** `scripts/test-proxy-only.js` does not cover the
+   admitted `Expect` path in production wiring, saturation with pending
+   suppressed counts (finding 1), the verbatim mode-line or warning wording,
+   or HTTP/1.0. Contract failure rows are otherwise covered.
+5. **Minor: docs.** `docs/DEVELOPMENT.md:161` is still headed "CONTRACT-012"
+   and its `TRUSTED_PROXIES` bullets do not say that setting the variable
+   now turns on proxy-only by default (only a link to Ingress modes). The
+   Ingress modes text "excess new peers are silently refused until expired
+   entries free capacity" is misleading given finding 1. `.env.example`
+   agrees with the contract.
+
+Residual risk (accepted by the contract): IP-based connector trust, plain
+HTTP on the LAN hop, no Cloudflare Access for direct LAN in off modes.
+TrueNAS checks are still TASK-034's.
+
+Recommended next transition: the human decides on finding 1. If a fix is
+wanted, return to `in-progress` (findings 1 and 2 are small). Otherwise
+accept from `review/` with findings 2-5 as follow-ups.
+
+### Returned to in-progress (Patrick, 2026-10-29)
+
+Patrick accepted the QA recommendation to fix before acceptance. Rework
+scope, limited to these items:
+
+1. QA finding 1 (should-fix): refusal-log state in `src/ingress.ts` must not
+   stop logging permanently when the peer table is full. Stale entries must
+   expire or be evicted whatever their pending suppressed count, so a new
+   peer is still logged (rate-limited per CONTRACT-013). Add a test with a
+   full table where every entry has a pending count.
+2. QA finding 2 (minor): handle `Expect` only for HTTP/1.1 requests;
+   HTTP/1.0 keeps Node's default behaviour. Add a test.
+3. QA finding 5 (minor): `docs/DEVELOPMENT.md` heading near line 161 names
+   CONTRACT-013, the section says setting `TRUSTED_PROXIES` turns proxy-only
+   on by default, and the peer-cap note matches the fixed behaviour.
+
+Findings 3 and 4 stay as accepted follow-ups unless they fall out of the
+above. Update the implementation handoff and move the task to `review/` when
+done.

@@ -2,7 +2,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { acquireProcessLock } from "./processLock.js";
-import { checkContainerStorage, isContainerMode, containerOwnershipFix } from "./container.js";
+import { checkContainerStorage, isContainerMode, containerDirectoryError, containerStorageFix } from "./container.js";
 
 import { PGlite } from "@electric-sql/pglite";
 
@@ -119,6 +119,10 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
   try {
     await mkdir(dataDirectory, { mode: REQUIRED_DIRECTORY_MODE, recursive: true });
   } catch (error) {
+    if (isContainerMode()) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(containerDirectoryError("file"));
+      throw new Error(containerStorageFix());
+    }
     throw new Error(
       `Data directory error for ${dataDirectory}: unable to create directory with mode 0700: ${errorMessage(error)}`,
     );
@@ -128,11 +132,12 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
   try {
     directoryStat = await stat(dataDirectory);
   } catch (error) {
+    if (isContainerMode()) throw new Error(containerStorageFix());
     throw new Error(`Data directory error for ${dataDirectory}: unable to inspect directory: ${errorMessage(error)}`);
   }
 
   if (!directoryStat.isDirectory()) {
-    throw new Error(`Data directory error: ${dataDirectory} is not a directory.`);
+    throw new Error(isContainerMode() ? containerDirectoryError("file") : `Data directory error: ${dataDirectory} is not a directory.`);
   }
 
   // Windows has no POSIX mode bits or uids (stat reports 0666/0777 and
@@ -144,8 +149,10 @@ export async function prepareDataDirectory(dataDirectory: string): Promise<void>
   }
 
   const actualMode = directoryStat.mode & 0o777;
-  if (isContainerMode() && (actualMode !== REQUIRED_DIRECTORY_MODE || directoryStat.uid !== process.getuid?.())) {
-    throw new Error(`Data directory permissions/ownership error: /data has mode ${modeString(actualMode)}, owner ${directoryStat.uid}. ${containerOwnershipFix()}`);
+  if (isContainerMode()) {
+    if (directoryStat.uid !== process.getuid?.()) throw new Error(containerDirectoryError("owner", directoryStat.uid));
+    if (actualMode !== REQUIRED_DIRECTORY_MODE) throw new Error(containerDirectoryError("mode", actualMode));
+    return;
   }
   if (actualMode !== REQUIRED_DIRECTORY_MODE) {
     throw new Error(

@@ -45,15 +45,83 @@ async function main() {
   try {
     assert.throws(() => validateContainerIdentity('/data', 0), /non-root/);
     assert.throws(() => validateContainerIdentity('/wrong', 568), /PGLITE_DATA_DIR/);
-    validateContainerIdentity('/data', 568);
-    validateContainerIdentity('/data', 1234);
+    validateContainerIdentity('/data/pglite', 568);
+    validateContainerIdentity('/data/pglite', 1234);
     assert.equal(hasDataMount('1 2 3:4 / / rw - overlay overlay rw'), false);
     assert.equal(hasDataMount('1 2 3:4 /dataset /data rw - zfs tank/data rw'), true);
     assert.equal(hasDataMount('1 2 3:4 / /data-other rw - ext4 /dev/sda rw'), false);
     process.env.BT_CONTAINER_MODE = '1';
-    await assert.rejects(checkContainerStorage('/data'), /operator-supplied storage|non-root/);
+    await assert.rejects(checkContainerStorage('/data/pglite'), /No storage is mounted|non-root/);
     delete process.env.BT_CONTAINER_MODE;
     console.log('PASS: container root/path guards, non-default UID, mount detection and actual missing mount fail closed');
+
+    // Redirect only the filesystem boundary: exercise real creation/access and
+    // permission checks in scratch storage without requiring mounts or root.
+    const startupSource = await fs.readFile(resolve('scripts/startup-check.js'), 'utf8');
+    const guidance = [...startupSource.matchAll(/containerMode \? (['"])(.*?)\1/g)].map(m => m[2]);
+    assert.equal(guidance.length, 4);
+    for (const message of guidance) {
+      assert.match(message, /Image|Storage|Environment Variables/);
+      assert.doesNotMatch(message, /chown|chmod|setfacl|\.env|npm run seed|start\.sh|host.path/i);
+    }
+    const mountedData = join(directory, 'mount');
+    await fs.mkdir(mountedData, { mode: 0o755 });
+    const preload = join(directory, 'container-preload.cjs');
+    await fs.writeFile(preload, `
+      const fs = require('node:fs/promises');
+      const root = process.env.TEST_DATA;
+      const original = Object.fromEntries(['readFile','stat','mkdir','access'].map(k => [k,fs[k]]));
+      const map = p => p === '/data' ? root : p === '/data/pglite' ? root + '/pglite' : p;
+      process.getuid = () => Number(process.env.TEST_UID || ${process.getuid()});
+      for (const k of ['stat','mkdir','access']) fs[k] = async (p,...args) => {
+        if (k === 'access' && process.env.TEST_UNWRITABLE) throw new Error('denied');
+        const result = await original[k](map(p),...args);
+        if (k === 'stat' && p === '/data/pglite' && process.env.TEST_OWNER) result.uid = Number(process.env.TEST_OWNER);
+        return result;
+      };
+      fs.readFile = (p,...args) => p === '/proc/self/mountinfo'
+        ? Promise.resolve(process.env.TEST_NO_MOUNT ? '' : '1 2 3:4 / /data rw - zfs tank/data rw')
+        : original.readFile(p,...args);
+      const db = require(${JSON.stringify(resolve('dist/database.js'))});
+      const open = db.openDatabase;
+      db.openDatabase = p => open(map(p));
+    `);
+    const containerEnv = { ...process.env, BT_CONTAINER_MODE: '1', TEST_DATA: mountedData, PGLITE_DATA_DIR: '/data/pglite' };
+    const prepare = overrides => spawnSync(process.execPath, ['--require', preload, '-e',
+      `require(${JSON.stringify(resolve('dist/database.js'))}).prepareDataDirectory(process.env.PGLITE_DATA_DIR).catch(e => { console.error(e.message); process.exitCode=1; })`],
+      { env: { ...containerEnv, ...overrides }, encoding: 'utf8' });
+    const parentBefore = await fs.stat(mountedData);
+    let prepared = prepare({});
+    assert.equal(prepared.status, 0, prepared.stderr);
+    assert.deepEqual(await fs.readdir(mountedData), ['pglite']);
+    const created = await fs.stat(join(mountedData, 'pglite'));
+    assert.equal(created.mode & 0o777, 0o700);
+    assert.equal(created.uid, process.getuid());
+    const parentAfter = await fs.stat(mountedData);
+    for (const key of ['uid', 'gid', 'mode']) assert.equal(parentAfter[key], parentBefore[key]);
+    const fail = (overrides, pattern, modeException = false) => {
+      const result = prepare(overrides);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, pattern);
+      assert.match(result.stderr, /Storage|Security Context|Environment Variables/);
+      if (!modeException) assert.doesNotMatch(result.stderr, /chown|chmod|setfacl|\.env|npm run seed|start\.sh|host.path|\/tmp\//i);
+    };
+    fail({ TEST_NO_MOUNT: '1' }, /No storage is mounted.*Mount Path \/data/);
+    fail({ TEST_UNWRITABLE: '1' }, /UID .*GID .*cannot write.*Enable ACL.*Modify/);
+    fail({ TEST_UID: '0' }, /root \(UID 0\).*Security Context.*568/);
+    fail({ TEST_OWNER: '9876' }, /belongs to UID 9876.*User ID back to 9876/);
+    for (const path of ['/data', '/elsewhere']) fail({ PGLITE_DATA_DIR: path }, /Remove the PGLITE_DATA_DIR environment variable/);
+    await fs.chmod(join(mountedData, 'pglite'), 0o755);
+    fail({}, /mode 0755.*0700.*TrueNAS Shell/, true);
+    assert.equal((await fs.stat(join(mountedData, 'pglite'))).mode & 0o777, 0o755);
+    await fs.rmdir(join(mountedData, 'pglite'));
+    await fs.writeFile(join(mountedData, 'pglite'), 'preserved');
+    fail({}, /not a directory.*Storage/);
+    assert.equal(await fs.readFile(join(mountedData, 'pglite'), 'utf8'), 'preserved');
+    await fs.unlink(join(mountedData, 'pglite'));
+    fail({ TEST_UNWRITABLE: '1' }, /cannot write/);
+    assert.deepEqual(await fs.readdir(mountedData), []);
+    console.log('PASS: container storage creation, unchanged parent permissions, all form failures and no probe residue (filesystem boundary redirected)');
 
     if (process.platform !== 'win32') {
       let first = holder(lockPath);
@@ -156,6 +224,16 @@ async function main() {
     assert.equal(noFileChannel.status, 1);
     assert.equal(await fs.readFile(inputFile, 'utf8'), 'do not consume');
     console.log('PASS: missing/invalid inputs write no seed rows; non-interactive file flags rejected; no *_FILE channel');
+
+    for (const name of ['DB_ENCRYPTION_KEY', 'CLIENT_SECRET']) {
+      const result = spawnSync(process.execPath, ['--require', preload, resolve('scripts/seed.js'), '--non-interactive'], {
+        env: { ...env, ...containerEnv, NODE_OPTIONS: `--require=${preload}`, [name]: '', [name + '_FILE']: inputFile }, encoding: 'utf8', timeout: 30000,
+      });
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, new RegExp(name));
+      assert.equal(await fs.readFile(inputFile, 'utf8'), 'do not consume');
+    }
+    console.log('PASS: container mode ignores both *_FILE inputs and requires CLIENT_SECRET for local-login first boot');
 
     const fresh = seed();
     assert.equal(fresh.status, 0, fresh.output);

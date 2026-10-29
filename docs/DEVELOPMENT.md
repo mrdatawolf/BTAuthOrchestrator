@@ -176,11 +176,10 @@ column comes from `createClientAddressResolver` in `src/clientAddress.ts`:
   The startup log line shows the trusted ranges (`trustedProxies=none` when
   unset).
 
-Behind the Cloudflare Tunnel, set it to the pinned subnet of the compose
-network the app shares with `cloudflared`, and keep that network to those two
-containers with no published host port. Otherwise a client could forge
-`CF-Connecting-IP` from a trusted address. Validate with
-`node scripts/test-trusted-proxies.js`.
+For the TrueNAS tunnel profile, set it to the separate connector machine's
+reserved/static LAN IPv4. See [Ingress modes](#ingress-modes) and the
+[Custom App walkthrough](#custom-app-form-walkthrough).
+Validate with `node scripts/test-trusted-proxies.js`.
 
 #### Local password change and admin reset (CONTRACT-009)
 
@@ -652,149 +651,229 @@ Document required test levels, coverage expectations, fixtures, and manual check
 
 Document secrets handling, data classification, dependency, and reporting rules.
 
-## Container deployment: TrueNAS SCALE and Cloudflare Tunnel (TASK-025)
+## Container deployment: TrueNAS Custom App (TASK-025)
 
-The target is TrueNAS SCALE 25.10.0.1, Custom App **Install via YAML**,
-with the app and the official `cloudflare/cloudflared` connector. The image
-uses Node 22 Bookworm slim. It builds with `npm ci` then `npm run build`
-(including `dist/console/`), installs production dependencies in a separate
-runtime stage, and defaults to UID:GID `568:568`. No image is published by this
-repository. Build from this checkout on the deployment host, or transfer a
-locally built image with Docker's save/load workflow. Both upstream image tags
-are moving tags: record the resolved digests when validating a release.
+Use the Custom App **form** on TrueNAS SCALE 25.10.0.1 (Goldeye) or newer.
+The published image is `ghcr.io/mrdatawolf/btauthorchestrator`; choose a released
+version tag (`v0.9.0` for the first release). Publication is TASK-033; confirm
+the tag is available before installing. No registry credentials are needed.
+Choose the tunnel or local-only profile below and read [Ingress modes](#ingress-modes).
 
-### Host storage and operator configuration
+### Custom App form walkthrough
 
-1. Create an empty directory/dataset on storage local to the TrueNAS host.
-   Set its ownership to `568:568` and mode `0700`, for example
-   `chown 568:568 <host-path>` and `chmod 700 <host-path>`. Remove extended
-   POSIX/NFSv4 ACL entries granting other principals access. The app checks
-   mode bits and UID, not extended ACLs. Never share this path with another
-   app. A dedicated non-root UID is also supported: set compose `user:` (or
-   `BT_UID`/`BT_GID`) and the host directory ownership to match.
-2. Supply `BT_DATA_HOST_PATH` as that existing absolute host path. The bind
-   definition refuses to create a missing host directory. The only supported
-   in-container path is `PGLITE_DATA_DIR=/data`. UID 0, another path, a missing
-   mount, and wrong ownership/mode refuse startup. The entrypoint never
-   changes ownership or permissions. There is deliberately **no `VOLUME
-   /data` declaration**: Docker must not silently create anonymous storage.
-   `/data` in the image is root-owned `0700`, and a Linux mountinfo check also
-   requires an actual mount at `/data` before seeding.
-3. Supply every-start environment variables: `DB_ENCRYPTION_KEY` (64 lowercase
-   hex characters), `EMERGENCY_ROTATION_TOKEN` and `LOCAL_USER_ADMIN_TOKEN`
-   (separate credentials, each at least 32 characters), and `LOCAL_LOGIN`
-   (`true` or `false`). Entra mode also needs `TENANT_ID` and `CLIENT_ID`.
-   Keep the encryption key outside the data dataset and its backups; do not
-   regenerate it for existing data. Optional throttle variables described
-   above can be added to the app's `environment` mapping.
-4. On first boot, also supply `CLIENT_SECRET`, `INITIAL_LOCAL_USER_USERNAME`,
-   `INITIAL_LOCAL_USER_EMAIL` and `INITIAL_LOCAL_USER_PASSWORD`, even in
-   local-login mode. Username is trimmed/lowercased, then must match
-   `[a-z0-9._-]{3,64}`; email must be valid and at most 254 characters;
-   password must be at least 12 characters. All needed inputs are validated
-   before writing any seed rows. Only missing pieces are created, so an
-   interrupted bootstrap can finish on the next start.
-5. Supply the existing tunnel's token as the connector's `TUNNEL_TOKEN`
-   environment variable. Never put it in a Dockerfile, build argument, CLI
-   argument, tracked YAML or other repository file. No `*_FILE` input channel
-   exists: Patrick's OQ-1 answer overrides CONTRACT-008's draft file channels.
+In Apps → Discover, open the Custom App installation form and name the app.
+Complete these settings for either profile:
 
-All these secrets are environment inputs. They are visible to authorized
-readers of `docker inspect`, TrueNAS app configuration, process environments,
-and potentially configuration exports/debug bundles. This exposure is the
-accepted OQ-1 tradeoff. After the first successful boot, remove
-`CLIENT_SECRET` and `INITIAL_LOCAL_USER_PASSWORD` from the app configuration;
-remove username/email too when no longer needed. Remove their YAML environment
-entries as well if you want no warning for empty-but-still-set values. Every
-subsequent start ignores inputs for already-seeded pieces, warns with the
-variable names (never values), and says changing them has no effect. These
-inputs cannot rotate stored credentials. A reinstall with empty storage needs
-them again. Persistent keys and admin tokens remain required on every start.
+| Form area | Setting | Value |
+|---|---|---|
+| Image | Repository / tag | `ghcr.io/mrdatawolf/btauthorchestrator` / released `vX.Y.Z` |
+| Security Context | Custom user; User ID / Group ID | **Enable the custom-user setting**, then `568` / `568`; not privileged. Another non-root pair is supported if Storage grants that UID Modify. |
+| Ports | Container port / host port / protocol | `3210` / your chosen host port / TCP. If overriding `PORT`, match the container port to it. |
+| Ports | Host IPs | **Select only the TrueNAS static LAN IPv4**. Never empty, `0.0.0.0` or `::`. |
+| Storage | Type / Mount Path / ACL | **Add an ix volume at `/data` and tick Enable ACL**. ACL entry: User, ID `568` (or your runtime UID), Modify. Use local storage. |
 
-### Build and install via YAML
+**Three easy-to-miss settings:** leaving the custom-user setting unticked can
+run the app as root, which it refuses. Omitting the ix volume leaves nothing
+mounted at `/data`, which it refuses. Leaving Host IPs empty publishes on
+**every IPv4 and IPv6 address**, not just the intended LAN address. TASK-034
+Phase 0 verified these settings and that the app-created directory reports
+mode `700`, owner `568:568` on an ACL-enabled ix volume.
 
-The checked-in `docker-compose.yml` is a template with operator-supplied
-`${VARIABLE}` references. For a local compose invocation, export the variables
-in the invoking environment; run `docker compose build`, then
-`docker compose up -d`. Do not enable the tunnel's public hostname until the
-Access policy below is in place.
+Under **Environment Variables**, enter the following values. Generate secrets
+on a machine of your choice and retain a secure off-box copy of the encryption
+key. Do not use file variants: `DB_ENCRYPTION_KEY_FILE` and `CLIENT_SECRET_FILE`
+supply nothing.
 
-For TrueNAS, prepare a **private deployment copy outside the repository**.
-Replace the interpolation expressions with the operator's values in that copy
-(including an absolute checkout path for `build.context`, because `.` in the
-TrueNAS app directory is not this checkout). Quote YAML strings, and escape
-literal dollar signs as `$$` for Compose. Do not assume your interactive shell's
-environment is inherited by the TrueNAS middleware. Paste the private copy into
-Apps → Discover → Install via YAML and name/install the app. If loading a
-prebuilt image instead, remove `build` from the private copy, retain the loaded
-image name, and set `pull_policy: never` for the app. Protect that private YAML
-and TrueNAS configuration as secrets. See the
-[TrueNAS custom-app instructions](https://apps.truenas.com/managing-apps/installing-custom-apps/).
-This workflow still needs operator validation on 25.10.0.1.
+| Variable | Tunnel profile | Local-only profile | When needed |
+|---|---|---|---|
+| `DB_ENCRYPTION_KEY` | 64 lowercase hex characters | Same | Every start; never generated by the app |
+| `EMERGENCY_ROTATION_TOKEN` | At least 32 characters | Same | Every start |
+| `LOCAL_USER_ADMIN_TOKEN` | Separate token, at least 32 characters | Same | Every start |
+| `LOCAL_LOGIN` | `true` or `false` | `true` | Every start |
+| `TENANT_ID`, `CLIENT_ID` | Required when `LOCAL_LOGIN=false` | Not needed with local login | Every start in Entra mode |
+| `SERVICE_ISSUER` | `https://orca.biztechro.com` | `http://<LAN-address-or-name>:<host-port>` | Every start |
+| `COOKIE_SECURE` | `true` | `false` | Every start |
+| `TRUSTED_PROXIES` | Connector machine's reserved/static LAN IPv4 | Empty or absent | Every start |
+| `PROXY_ONLY` | Optional; see [Ingress modes](#ingress-modes) | Leave unset | Optional |
+| `PORT` | Default `3210` | Default `3210` | Optional override; match port mapping |
+| `PGLITE_DATA_DIR` | Do not set | Do not set | Image supplies `/data/pglite` |
+| `BT_CONTAINER_MODE` | Do not set | Do not set | Image enables container mode |
+| `ALLOW_NEW_LOCAL_LOGIN_CREATION` | Optional | Optional | See local registration settings above |
+| `LOCAL_LOGIN_MAX_FAILED_ATTEMPTS`, `LOCAL_LOGIN_LOCKOUT_MINUTES`, `LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS`, `LOCAL_LOGIN_IP_THROTTLE_WINDOW_MINUTES` | Optional | Optional | Defaults described above |
+| `CLIENT_SECRET` | Required | Required, including local-login demos | First boot while unseeded; the container never generates it |
+| `INITIAL_LOCAL_USER_USERNAME`, `INITIAL_LOCAL_USER_EMAIL`, `INITIAL_LOCAL_USER_PASSWORD` | Required | Required | First boot while local users are unseeded |
 
-The entrypoint explicitly establishes `BT_CONTAINER_MODE=1`, runs
-`node scripts/seed.js --non-interactive`, then `node scripts/startup-check.js`,
-then replaces itself with `node dist/index.js`. It never reads `.env` or calls
-`start.sh`. Automatic seeding returns 0 for already-seeded data; the plain CLI
-retains its non-zero result and read-then-unlink file flags. Startup checks
-verify the stored secret and signing key can be decrypted. Health checks request
-`GET /health` over loopback without opening another database handle. SIGTERM
-reaches the running Node server; Docker's default stop grace period applies.
-The restart policy is `unless-stopped`.
+First-user username is trimmed/lowercased and must match `[a-z0-9._-]{3,64}`;
+email must be valid and at most 254 characters; password must be at least 12
+characters. Save/install the app and check its logs and health. Inputs are
+validated before seed rows are written; interrupted bootstrap fills only
+missing pieces on restart.
 
-### Cloudflare configuration before exposure
+After successful first boot, remove `CLIENT_SECRET` and
+`INITIAL_LOCAL_USER_PASSWORD` from Environment Variables. Username/email can
+also be removed. Restarting retains the stored credentials; inputs for seeded
+pieces are ignored with a per-start warning naming the variable, never its
+value. Changing a seed input cannot rotate stored credentials. An empty new
+volume needs all first-boot inputs again. Keep every-start inputs configured.
 
-1. In Cloudflare Zero Trust, add a self-hosted Access application for
-   `orca.biztechro.com/admin/*` and an Allow policy limited to the intended
-   operators. This covers the console/assets, user API, `/admin/session`,
-   reset-password page and emergency rotation. Configure this **before**
-   enabling the public hostname. See
-   [Cloudflare's Access setup](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/).
-2. In the existing tunnel's public hostname/published application routes,
-   configure `orca.biztechro.com` → HTTP service `http://app:3210`.
-   The connector uses `TUNNEL_TOKEN` with `tunnel --no-autoupdate run`; see
-   [tunnel run parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/).
-3. In the `biztechro.com` zone's SSL/TLS → Edge Certificates, enable
-   [Always Use HTTPS](https://developers.cloudflare.com/ssl/edge-certificates/additional-options/always-use-https/).
-   Keep `SERVICE_ISSUER=https://orca.biztechro.com` and `COOKIE_SECURE=true`,
-   as shipped. The Entra redirect URI remains
-   `https://orca.biztechro.com/auth/callback`.
+Environment-only secrets are visible in `docker inspect`, TrueNAS app
+configuration, process environments, and possibly configuration exports/debug
+bundles. This is the accepted exposure tradeoff. Protect access to those
+surfaces and backups; the service does not log secret values.
+
+### Storage, recovery and image behavior
+
+**Warning: uninstalling with “remove ix volumes” deletes all keys and users.**
+Take snapshots of the app volume and maintain backups appropriate to your
+recovery needs. Keep `DB_ENCRYPTION_KEY` backed up securely **off-box and
+separately from database snapshots**. Losing it makes encrypted data
+unrecoverable; do not replace it when restoring an existing database.
+
+The app checks that `/data` is mounted, writable and enterable without changing
+its owner, mode or ACL or leaving a probe file. It creates only `pglite` there,
+at mode `0700`, owned by the runtime UID. Existing `/data/pglite` must already
+be a directory with that owner and mode; the app never repairs it automatically.
+Image recreation retains the ix volume. Do not share it with another app or
+put it on a network filesystem.
+
+The image uses digest-pinned Node 22 Bookworm slim stages and defaults to
+`PORT=3210`, `PGLITE_DATA_DIR=/data/pglite`, container mode on and UID:GID
+`568:568`. Its own `/data` stays root-owned and it declares no Docker volume;
+an explicit mount is required. Build arguments `VERSION` and `REVISION`
+populate OCI release metadata. The entrypoint runs non-interactive seed,
+startup checks, then replaces itself with the server. Health checks request
+loopback `GET /health` at the effective `PORT` without opening the database.
+SIGTERM reaches Node and releases its process lock; Docker's default stop
+grace period applies.
+
+### Cloudflare dashboard setup (tunnel profile)
+
+The connector runs on a separate LAN machine with a reserved/static IPv4.
+Configure its tunnel token there, never in Orca's form.
+
+1. Before enabling the public route, in Cloudflare Zero Trust create a
+   self-hosted Access application for `orca.biztechro.com/admin/*`, with an
+   Allow policy restricted to intended operators. This includes console
+   assets, sessions, user management and emergency rotation.
+2. In the tunnel's published application routes/public hostnames, route
+   `orca.biztechro.com` to HTTP service `http://<truenas-ip>:<port>`, using
+   the TrueNAS static LAN IPv4 and the published host port from the form.
+3. In the zone's SSL/TLS → Edge Certificates, enable Always Use HTTPS.
+   Keep `SERVICE_ISSUER=https://orca.biztechro.com` and `COOKIE_SECURE=true`.
+   Entra mode uses redirect URI `https://orca.biztechro.com/auth/callback`.
 4. Leave `/auth/*`, `/.well-known/jwks.json`, `/health`, `/api/*`, `/docs`
-   and `/openapi.json` outside Access. Consuming servers must fetch JWKS
-   without an interactive Cloudflare login. Scripts calling admin endpoints
-   need a Cloudflare Access service token (`CF-Access-Client-Id` and
-   `CF-Access-Client-Secret`, with a Service Auth policy) **as well as** the
-   service's existing bearer token. Access does not replace app authorization.
+   and `/openapi.json` outside Access. Admin scripts need an Access service
+   token and Service Auth policy as well as Orca's own bearer token.
 
-CONTRACT-012 §4 invariants: **no compose service publishes a host port**;
-only the app and connector join the dedicated `172.30.10.0/29` network;
-`TRUSTED_PROXIES` covers only that subnet. If it conflicts with a host network,
-change both the subnet and `TRUSTED_PROXIES` together in the private deployment
-copy. Publishing Node's port or adding another container to the trusted network
-could allow forged `CF-Connecting-IP` values. Do neither. The bridge has outbound
-connectivity for the tunnel; it is not an `internal: true` network. All clients,
-including LAN clients, use Cloudflare; internet/tunnel failure makes the service
-unreachable. TASK-029 must be accepted before enabling traffic.
+For local-only operation, no tunnel or Access application is required. Plain
+HTTP exposes passwords, cookies and tokens on the LAN, and admin endpoints
+have only Orca's own authorization. Nothing is reachable outside the LAN.
+Entra sign-in cannot use the plain-HTTP LAN redirect; use local login. Console
+session cookies need a `biztechro.com` name resolving to the LAN address;
+using a bare IP or localhost requires the console's token fallback. See
+[Ingress modes](#ingress-modes) for request admission and direct LAN access.
 
-### Validation and operational checks
+### Validation
 
-Run `npm run build` and `node scripts/test-container-deployment.js` on Node 22.
-The latter uses scratch data outside the repository, validates seed behavior,
-container guards, real POSIX lock races/SIGSTOP/SIGKILL, real HTTP health and
-SIGTERM, persistence after a crash, and the existing offline verifier. It does
-not validate Docker, TrueNAS, Windows or a real tunnel. Run all existing
-`scripts/test-*.js` as regression checks too.
+Run `npm run build` and every `scripts/test-*.js` on Node 22. The container
+suite uses scratch data and filesystem-boundary redirection for container
+storage checks, plus real process-lock races, crash recovery, seed, HTTP
+health and shutdown tests. It does not prove Docker namespace or TrueNAS
+behavior. Image build/run checks belong to TASK-033; full TrueNAS persistence,
+form installation, tunnel/Access, client-address and browser checks belong to
+TASK-034. Validate before go-live, including publishing only on the selected
+TrueNAS IPv4.
 
-On a Docker host, validate non-root identity, first boot/restart,
-`docker compose down`/`up` persistence, SIGKILL recovery, paused/concurrent
-container refusal, UID 0/wrong path/missing mount rejection, and clean
-`docker stop`. Inspect `docker history --no-trunc` and saved image layers for
-secret material. Use throwaway environment values and scratch host storage;
-keep temporary port mappings out of the shipped compose file.
+## Ingress modes
 
-Before go-live, the operator must verify through the real tunnel: health;
-console and its three assets; console sign-in/sign-out/user management at the
-HTTPS hostname; Access required on `/admin/*` but not sign-in/JWKS; two clients'
-public addresses recorded separately; and a forged `CF-Connecting-IP` unable
-to change the recorded address. Confirm no app port is open on TrueNAS.
-These checks are pending, not implied by the isolated test suite.
+CONTRACT-013 governs ingress for both native and container installs. It
+supersedes the older CONTRACT-012 topology described elsewhere in this guide.
+The connector runs on a separate LAN machine. Set `TRUSTED_PROXIES` to that
+machine's reserved/static LAN address, never the TrueNAS host's own address,
+a Docker gateway, a container-network address, or a range covering other LAN
+hosts. TrueNAS Phase 0 confirmed that remote clients arrive with their real
+LAN IPs, and requests from TrueNAS to its own LAN IP arrive with the TrueNAS
+LAN IP. Publish only on the TrueNAS static LAN IPv4.
+
+| Mode | Variables | Behavior and tradeoffs |
+|---|---|---|
+| Proxy-only | `TRUSTED_PROXIES=<connector IP>`; `PROXY_ONLY` unset or `true` | Only trusted peers can reach routes; everyone else receives 403 except loopback GET/HEAD exactly `/health`. LAN users need the tunnel; a tunnel outage removes their access too. |
+| Tunnel plus direct LAN | `TRUSTED_PROXIES=<connector IP>`; `PROXY_ONLY=false` | All peers are admitted. A trusted connector can supply `CF-Connecting-IP`; direct clients are recorded under their socket address. Direct `/admin/*` access bypasses Cloudflare Access. With `COOKIE_SECURE=true`, browsers on plain HTTP will not retain the session cookie; use the tunnel hostname. |
+| Local-only | `TRUSTED_PROXIES` empty/unset; `PROXY_ONLY` unset or `false` | All peers are admitted and recorded under their socket address; forwarded headers are ignored. Use a LAN `http://` `SERVICE_ISSUER`, `COOKIE_SECURE=false`, and in practice `LOCAL_LOGIN=true`. |
+
+`PROXY_ONLY` accepts trimmed, case-insensitive `true` or `false`; empty means
+unset. Its default is derived from whether `TRUSTED_PROXIES` has entries.
+Other values fail startup with a Configuration error. `PROXY_ONLY=true` with
+empty `TRUSTED_PROXIES` also fails, naming both variables. `TRUSTED_PROXIES`
+accepts comma-separated IPv4/IPv6 addresses and CIDRs; invalid entries fail
+startup. IPv4-mapped peers normalize to IPv4. Client-address resolution is
+unchanged: only a trusted peer's single valid `CF-Connecting-IP` is accepted;
+otherwise the socket address is used. `X-Forwarded-For` is never used.
+
+Proxy-only refuses requests before monitoring, routing, body reads, cookies,
+database/audit writes or throttle accounting. The response is 403 with
+`Content-Type: text/plain; charset=utf-8`, `Cache-Control: no-store`,
+`Connection: close`, no cookie, and this body followed by a newline:
+
+```text
+Forbidden. This service only accepts requests through its configured proxy.
+```
+
+The loopback exception covers `127.0.0.0/8` and `::1`, including mapped IPv4,
+only for GET/HEAD with the exact target `/health`. Admission does not change
+the GET-only health route: HEAD still receives the existing route result.
+
+Logs explain configuration and problems without requiring access to settings:
+
+- `Starting BTAuthOrchestrator ... trustedProxies=... proxyOnly=...` reports
+  the effective settings. `Ingress mode: proxy-only`, `Ingress mode: tunnel
+  plus direct LAN`, or `Ingress mode: local-only` follows before listening,
+  with the behavior and whether `PROXY_ONLY` was explicitly set or derived.
+- `TRUSTED_PROXIES range ...: every host in it is trusted.` appears once
+  per entry wider than IPv4 /32 or IPv6 /128. Startup continues.
+- `Proxy-only: SERVICE_ISSUER is expected to start with https://.` and
+  `Proxy-only: COOKIE_SECURE is expected to be true.` warn independently
+  when proxy-only is on. Neither check applies to the off modes.
+- `Proxy-only refusal: peer=... path=... suppressed=...` reports at most
+  once per peer per 60 seconds. Paths exclude queries, escape control
+  characters and truncate at 256 characters; no headers are logged.
+  Missing peers use `<no-peer>`. Tracking is capped at 4,096 peers; excess
+  new peers are silently refused until expired entries free capacity.
+- `Ingress warning: peer=...; this looks like a tunnel install missing
+  TRUSTED_PROXIES...` explains that all tunnel users share the connector's
+  address and proxy-only is off. It triggers in local-only mode upon
+  `CF-Connecting-IP`, `CF-Ray`, `CF-Visitor`, `CF-IPCountry`, or `CDN-Loop`
+  containing `cloudflare`.
+- `Ingress warning: peer=...; the connector's address may have changed.
+  Check TRUSTED_PROXIES.` triggers for those same headers from an untrusted
+  peer in tunnel plus direct LAN mode. Both runtime warnings are limited to
+  once per 10 minutes per process and never include header values. Restore
+  the connector reservation or correct its trusted address; never trust the
+  Docker gateway to hide a forwarding problem.
+
+Trust remains based on the connector IP. Any process on that machine, or
+anyone who takes over its address (including via ARP poisoning), can forge
+client addresses and reach admin routes without Cloudflare Access. The
+connector-to-TrueNAS hop is plain HTTP; an observer can read passwords,
+session cookies and bearer tokens. Cloudflare Access must cover `/admin/*`
+on the public hostname; it does not protect direct LAN traffic. The service's
+bearer tokens and session authorization still apply in all modes.
+
+Local-only gives up Cloudflare Access and external reachability. Plain HTTP
+exposes credentials on the LAN. Console cookies require a host under
+`biztechro.com`; at a bare IP or localhost the console falls back to tokens.
+Use a LAN DNS/hosts-file entry for such a name and `COOKIE_SECURE=false` for
+console cookie sign-in. Entra accepts HTTP redirects only at localhost, so
+LAN local-only use is practically limited to local login. No ingress check
+requires HTTPS, secure cookies or a proxy in this mode. Container first-boot
+secret inputs remain governed by CONTRACT-014.
+
+**Upgrade release note:** native installs that already set `TRUSTED_PROXIES`
+become proxy-only on upgrade, refusing direct and loopback requests except
+the health exception. Set `PROXY_ONLY=false` to retain direct access. No such
+native install was known when CONTRACT-013 was approved. Native installs
+without `TRUSTED_PROXIES` retain their current behavior.
+
+Validate with `node scripts/test-proxy-only.js` and
+`node scripts/test-trusted-proxies.js` after building on Node 22. Hardware,
+real tunnel and TrueNAS deployment checks belong to TASK-034.

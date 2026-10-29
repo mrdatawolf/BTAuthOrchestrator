@@ -114,25 +114,25 @@ What changed (CONTRACT-014, Patrick's decisions 2026-10-28/29):
 
 ## Acceptance criteria
 
-- [ ] With an empty writable `/data`, first start creates only
+- [x] With an empty writable `/data`, first start creates only
       `/data/pglite`, mode `0700`, owned by the runtime UID; `/data` is
       unchanged.
-- [ ] No mount, unwritable `/data`, `/data/pglite` owned by another UID,
+- [x] No mount, unwritable `/data`, `/data/pglite` owned by another UID,
       `/data/pglite` mode `0755`, `/data/pglite` as a file, UID 0,
       `PGLITE_DATA_DIR=/elsewhere` and `PGLITE_DATA_DIR=/data` each fail
       closed with CONTRACT-014's message for that case.
-- [ ] Messages name the form setting and contain no `chown`, `chmod`,
+- [x] Messages name the form setting and contain no `chown`, `chmod`,
       `setfacl`, `.env`, `npm run seed`, `start.sh` or host path, except the
       wrong-mode message.
-- [ ] Setting `DB_ENCRYPTION_KEY_FILE` or `CLIENT_SECRET_FILE` in container
+- [x] Setting `DB_ENCRYPTION_KEY_FILE` or `CLIENT_SECRET_FILE` in container
       mode supplies nothing.
-- [ ] Dockerfile: digest-pinned bases, `PORT` and `PGLITE_DATA_DIR`
+- [x] Dockerfile: digest-pinned bases, `PORT` and `PGLITE_DATA_DIR`
       defaults, `USER 568:568`, healthcheck on the effective `PORT`, OCI
       labels, no `VOLUME`.
-- [ ] `docker-compose.yml` and `BT_BUILD_CONTEXT` are gone, and no doc
+- [x] `docker-compose.yml` and `BT_BUILD_CONTEXT` are gone, and no doc
       describes a compose or YAML install.
-- [ ] `docs/DEVELOPMENT.md` has the form walkthrough for both profiles.
-- [ ] `npm run build` and every `scripts/test-*.js` pass on Node 22.
+- [x] `docs/DEVELOPMENT.md` has the form walkthrough for both profiles.
+- [x] `npm run build` and every `scripts/test-*.js` pass on Node 22.
 
 ## Validation requirements
 
@@ -157,7 +157,111 @@ reports `700`, owner `568:568`.
 
 ## Implementation handoff
 
-Not started (for the rewritten scope).
+Task: TASK-025
+Implementer: openai-coder
+Date: 2026-10-29
+
+### Changes made
+
+- `src/container.ts`: require `/data/pglite`, preserve Linux mount detection,
+  check `/data` directory access with W_OK | X_OK (no probe files, no mode/owner
+  inspection or changes), and provide TrueNAS form-oriented failure guidance.
+- `src/database.ts`: create/verify `/data/pglite` at 0700, distinguish file,
+  owner and mode failures; preserve native behavior and all process-lock code.
+- `scripts/startup-check.js`: form guidance and profile-neutral service-address
+  output. Existing non-interactive seed already requires CLIENT_SECRET in local
+  login; no seed behavior change was needed.
+- `Dockerfile`: both stages pinned to the real Docker Hub manifest digest
+  `sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da`;
+  PORT=3210, PGLITE_DATA_DIR=/data/pglite, OCI source/version/revision/MIT labels.
+  Preserved USER 568:568, root-owned image /data, no VOLUME, entrypoint and
+  effective-PORT healthcheck. VERSION and REVISION are build arguments.
+- Deleted `docker-compose.yml`. Removed the retired build-context identifier
+  everywhere. Replaced the old subnet in generic trusted-proxy test fixtures
+  with documentation-range 192.0.2.0/29; these remain generic CIDR tests.
+- Expanded container tests for redirected storage, all required failures,
+  forbidden guidance, untouched file inputs and local-login CLIENT_SECRET.
+- Replaced only container/compose guidance in `docs/DEVELOPMENT.md` with both
+  profiles, all three easy-to-miss settings, first-boot removal, backup/deletion
+  warnings and Cloudflare dashboard steps. Preserved TASK-032's Ingress modes.
+
+### Validation performed
+
+All Node/npm commands below used the exact prefix
+`PATH=/home/patrick/.nvm/versions/node/v22.22.3/bin:$PATH`.
+
+| Command | Result |
+|---|---|
+| `node --version` | Exit 0, v22.22.3. |
+| `node node_modules/typescript/bin/tsc` | Exit 0; compiled before the narrow test. |
+| `node scripts/test-container-deployment.js` (narrow runs) | First two runs exit 1 due to test-harness redirection gaps: child preload not inherited, then lock socket still targeted real /data. Fixed harness only. Third and final fourth runs exit 0. Final log `/tmp/task025-narrow-final.log`. |
+| `npm run build` | Exit 0; tsc succeeded, copied 4 console files. Run after final narrow test. |
+| `node scripts/test-admin-console.js` | Exit 0. |
+| `node scripts/test-api-docs.js` | Exit 0. |
+| `node scripts/test-console-sign-in.js` | Exit 0. |
+| `node scripts/test-container-deployment.js` (full regression) | Exit 0, including its real HTTP offline verifier: AC1/AC2/AC3 and Overall PASS. |
+| `node scripts/test-local-password-change.js` | Exit 0. |
+| `node scripts/test-local-registration.js` | Exit 0. |
+| `node scripts/test-proxy-only.js` | Exit 0 (TASK-032). |
+| `node scripts/test-trusted-proxies.js` | Exit 0. |
+| `sh -n scripts/container-entrypoint.sh` | Exit 0. |
+| `node --check scripts/startup-check.js` | Exit 0. |
+| `git diff --check` | Exit 0 on each validation run. |
+| Python 3 urllib registry request | Exit 0: obtained pull token from auth.docker.io, fetched registry-1.docker.io/v2/library/node/manifests/22-bookworm-slim with OCI/Docker index Accept headers; Docker-Content-Digest exactly matched independently computed SHA-256 of response bytes (digest above). No Docker required. |
+| Python 3 static assertions | Exit 0: two digest-pinned FROMs, defaults, user, labels, healthcheck references effective PORT, root-owned image directory construction, no VOLUME, deleted compose file, both form profiles/settings/backup/route guidance and ingress anchor present. |
+| `rg` search for the retired build-context identifier | Exit 1, no matches. |
+| Search supported docs/code for retired subnet and compose/YAML install instructions | No matches. Immutable contracts and historical task records intentionally excluded. |
+
+Every test script was invoked individually and sequentially after the build,
+using a Python subprocess runner; all eight exited 0. Logs are
+`/tmp/task025-test-<name>.js.log`; summary is
+`/tmp/task025-regression-results.txt`. No Docker command/build/run was attempted.
+No failures attributable to TASK-032 were observed.
+
+### Acceptance criteria evidence
+
+All eight rewritten criteria checked for local implementation verification:
+storage creation/ownership/mode and unchanged parent uid/gid/mode, all failure
+messages, ignored file inputs, Dockerfile static requirements, removal of the
+supported old install path, both walkthrough profiles, build and every test.
+Container tests redirect the filesystem boundary to scratch directories and
+inject mountinfo, UID/foreign-owner and denied-access cases. Real directory
+creation/access, mode refusal and file preservation are exercised. This does
+not claim an actual /data mount, Docker image execution, or NFSv4 ACL testing.
+TASK-034 Phase 0's supplied evidence supports the TrueNAS ACL assumption.
+
+### Assumptions and deviations
+
+- No contracts edited. Under ADR-001 and the instruction to preserve history,
+  superseded contracts and previous handoffs retain obsolete topology/install
+  descriptions. “No doc describes a compose install” is applied to supported
+  operator guidance, not immutable historical records.
+- The access check uses filesystem access(W_OK | X_OK), rather than a temporary
+  write, so it cannot leave a probe entry or modify parent metadata. As with
+  any startup check, storage can fail after the check; creation also fails closed.
+- No prescribed file-case wording exists in CONTRACT-014; supplied a Storage
+  snapshot/new-empty-volume remedy consistent with its directory requirement.
+- PGLITE_DATA_DIR errors state the required path without echoing arbitrary input.
+- No changes to TASK-032-owned config parsing, request handling, client address,
+  new ingress implementation/test, or Ingress modes section. Concurrent changes
+  to those files are not part of this handoff.
+- No commit, staging, or index/working-tree-mutating Git commands.
+
+### Unmet items and unresolved risks
+
+No unmet locally testable rewritten criterion. Docker is not installed, so
+image build/run, actual container namespace/mount behavior and layer inspection
+remain unverified (TASK-033). Full TrueNAS install, snapshots/recreation,
+Cloudflare/Access and browser checks remain TASK-034. Publication is TASK-033;
+no published tag is claimed. Runtime filesystem/ACL behavior beyond the supplied
+Phase 0 evidence is not proven by host tests. Independent review and human
+acceptance remain pending.
+
+### Documentation updated
+
+`docs/DEVELOPMENT.md` container walkthrough and obsolete container-topology
+paragraph; this handoff. Task moved to review, not accepted.
+
 
 ## Previous implementation handoff (compose design, superseded 2026-10-29)
 

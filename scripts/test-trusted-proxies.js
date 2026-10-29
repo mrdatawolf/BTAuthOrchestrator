@@ -22,8 +22,8 @@ const environment = {
   EMERGENCY_ROTATION_TOKEN: 'b'.repeat(32), LOCAL_USER_ADMIN_TOKEN: ADMIN, LOCAL_LOGIN: 'true',
   LOCAL_LOGIN_IP_THROTTLE_MAX_ATTEMPTS: '3',
 };
-const CONNECTOR = '172.30.10.2';
-const SUBNET = '172.30.10.0/29';
+const CONNECTOR = '192.0.2.2';
+const SUBNET = '192.0.2.0/29';
 
 async function request(handler, method, url, body, headers = {}, peer = '127.0.0.1') {
   const req = Readable.from(body === undefined ? [] : [JSON.stringify(body)]);
@@ -44,7 +44,7 @@ async function main() {
   assert.deepEqual(parseTrustedProxies(undefined, ok), []);
   assert.deepEqual(parseTrustedProxies('   ', ok), []);
   assert.deepEqual(parseTrustedProxies(` ${SUBNET} , 10.1.2.3, fd00::/8, ::ffff:192.168.1.5 `, ok), [
-    { address: '172.30.10.0', prefix: 29, family: 'ipv4' },
+    { address: '192.0.2.0', prefix: 29, family: 'ipv4' },
     { address: '10.1.2.3', prefix: 32, family: 'ipv4' },
     { address: 'fd00::', prefix: 8, family: 'ipv6' },
     { address: '192.168.1.5', prefix: 32, family: 'ipv4' },
@@ -77,7 +77,7 @@ async function main() {
     assert.equal(trusted(fakeRequest(CONNECTOR, headers)), CONNECTOR, `fallback for ${value}`);
   }
   assert.equal(trusted(fakeRequest(CONNECTOR, { 'cf-connecting-ip': ['203.0.113.9', '203.0.113.10'] })), CONNECTOR, 'repeated header');
-  assert.equal(trusted(fakeRequest('172.30.10.8', forged)), '172.30.10.8', 'just outside the range');
+  assert.equal(trusted(fakeRequest('192.0.2.8', forged)), '192.0.2.8', 'just outside the range');
   console.log('PASS: client address follows every row of CONTRACT-012 §2');
 
   // End to end: throttle keys and audit source_ip through the real handler.

@@ -47,6 +47,8 @@ export interface Config {
   localLoginIpThrottleWindowMinutes: number;
   // CONTRACT-012 §3: optional; empty means forwarded headers are ignored.
   trustedProxies: TrustedProxyRange[];
+  proxyOnly: boolean;
+  proxyOnlyExplicit: boolean;
 }
 
 function normalizeLocalLoginFlag(raw: string | undefined): "true" | "false" | undefined {
@@ -178,6 +180,16 @@ export function loadConfig(environment: NodeJS.ProcessEnv): Config {
 
   const trustedProxies = parseTrustedProxies(environment.TRUSTED_PROXIES, invalid);
 
+  const proxyOnlyRaw = environment.PROXY_ONLY?.trim().toLowerCase();
+  const proxyOnlyExplicit = proxyOnlyRaw !== undefined && proxyOnlyRaw !== "";
+  if (proxyOnlyExplicit && proxyOnlyRaw !== "true" && proxyOnlyRaw !== "false") {
+    invalid.push('PROXY_ONLY (must be exactly "true" or "false", case-insensitive)');
+  }
+  const proxyOnly = proxyOnlyExplicit ? proxyOnlyRaw === "true" : trustedProxies.length > 0;
+  if (proxyOnly && trustedProxies.length === 0) {
+    invalid.push("PROXY_ONLY=true requires non-empty TRUSTED_PROXIES");
+  }
+
   if (missing.length > 0 || invalid.length > 0) {
     const details = [
       missing.length > 0
@@ -212,5 +224,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv): Config {
     localLoginIpThrottleMaxAttempts,
     localLoginIpThrottleWindowMinutes,
     trustedProxies,
+    proxyOnly,
+    proxyOnlyExplicit,
   };
 }

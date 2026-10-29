@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { exportJWK, importSPKI, jwtVerify } from "jose";
 
 import { loadConfig, type Config } from "./config.js";
+import { reportIngressMode, withIngressAdmission } from "./ingress.js";
 import { createApiDocsHandler } from "./apiDocs.js";
 import { createAdminConsoleHandler } from "./adminConsole.js";
 import { createClientAddressResolver, formatTrustedProxies } from "./clientAddress.js";
@@ -1832,13 +1833,18 @@ async function start(): Promise<void> {
         `port=${config.port} localLogin=${config.localLogin} ` +
         `allowNewLocalLoginCreation=${config.allowNewLocalLoginCreation} ` +
         `issuer=${config.issuer} dataDir=${config.pgliteDataDir} ` +
-        `trustedProxies=${formatTrustedProxies(config.trustedProxies)}`,
+        `trustedProxies=${formatTrustedProxies(config.trustedProxies)} proxyOnly=${config.proxyOnly}`,
     );
+    reportIngressMode(config);
     await prepareDataDirectory(config.pgliteDataDir);
     databaseHandle = await openDatabase(config.pgliteDataDir);
     const secretsStore = createSecretsStore(databaseHandle.database, config.dbEncryptionKey);
     const localUserStore = createLocalUserStore(databaseHandle.database);
-    const server = createServer(withRequestMonitoring(createRequestHandler(secretsStore, config, localUserStore)));
+    const listener = withIngressAdmission(withRequestMonitoring(createRequestHandler(secretsStore, config, localUserStore)), config);
+    const server = createServer(listener);
+    // Prevent Node's automatic 100/417 responses from preceding admission.
+    server.on("checkContinue", listener);
+    server.on("checkExpectation", listener);
 
     server.listen(config.port, () => {
       console.log(`BTAuthOrchestrator listening on port ${config.port}`);

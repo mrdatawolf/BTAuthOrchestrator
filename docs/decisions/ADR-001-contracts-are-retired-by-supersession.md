@@ -1,6 +1,6 @@
 # ADR-001: Contracts are retired by supersession, never amended in place
 
-Status: Accepted
+Status: Accepted (narrow exception added by ADR-004, 2026-11-02)
 Date: 2026-09-15
 Decision owners: Patrick Moon
 Related tasks and contracts: TASK-009, TASK-011 (Finding F1); CONTRACT-002

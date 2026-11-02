@@ -720,6 +720,7 @@ Complete these settings for either profile:
 | Ports | Container port / host port / protocol | `3210` / your chosen host port / TCP. If overriding `PORT`, match the container port to it. |
 | Ports | Host IPs | **Select only the TrueNAS static LAN IPv4**. Never empty, `0.0.0.0` or `::`. |
 | Storage | Type / Mount Path / ACL | **Add an ix volume at `/data` and tick Enable ACL**. ACL entry: User, ID `568` (or your runtime UID), Modify. Use local storage. |
+| Storage (alternative) | Host Path | A dataset you create (Apps preset), **ACL stripped**, owner/group `apps`, mode `755`; mount at `/data` with **Enable ACL unticked**. Easier to back up, copy and import. See [DOCKER.md](../DOCKER.md#41-prepare-storage) (CONTRACT-014, amended 2026-11-02). |
 
 **Three easy-to-miss settings:** leaving the custom-user setting unticked can
 run the app as root, which it refuses. Omitting the ix volume leaves nothing

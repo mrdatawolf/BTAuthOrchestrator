@@ -3,6 +3,9 @@
 Status: Approved
 Approved by: Patrick
 Approved date: 2026-10-29
+Amended: 2026-11-02 by Patrick, in place under ADR-004 (host-path dataset
+allowed as a second `/data` storage option; no code change). See
+"Amendment log" at the end.
 Related tasks: TASK-031 (this contract's drafting task), TASK-025 (container
 image and code), TASK-033 (GHCR image publishing), TASK-034 (TrueNAS
 validation)
@@ -61,7 +64,8 @@ and the operator has no shell step in a form install. This contract
 replaces those container sections so that:
 
 - `/data` is an ix volume that TrueNAS creates, made writable through the
-  form's Storage → Enable ACL setting.
+  form's Storage → Enable ACL setting, or (amended 2026-11-02) an
+  operator-created dataset mounted as a Host Path (§7.1).
 - The database lives in `/data/pglite`, which the app creates itself at mode
   `0700`. CONTRACT-008 §5's strict mode and owner check applies there, not
   to `/data`.
@@ -86,7 +90,8 @@ complete list of behavioral changes is:
 1. **Install path.** Form only, from a published image. "Install via YAML",
    compose and building on the host are no longer part of the profile.
 2. **Storage.** `/data` is an operator-provided mount (an ix volume with an
-   ACL entry granting the runtime UID Modify). It is no longer required to be
+   ACL entry granting the runtime UID Modify, or, amended 2026-11-02, a
+   host-path dataset as in §7.1). It is no longer required to be
    mode `0700`, owned by the runtime UID, or free of extended ACL entries.
 3. **Data path.** `PGLITE_DATA_DIR` is `/data/pglite` in container mode
    (was `/data`), set by the image.
@@ -148,10 +153,11 @@ actors. CONTRACT-008's other actors are unchanged, except that its
   (for example `DB_ENCRYPTION_KEY`) on a machine of their choice and keep an
   off-box copy of `DB_ENCRYPTION_KEY`.
 - **Container runtime**: Docker on TrueNAS SCALE 25.10.0.1 (Goldeye) or
-  newer. It pulls the image, creates the ix volume, starts and stops the
-  container (SIGTERM, then SIGKILL after the stop grace period), restarts it
-  under its restart policy, and recreates it on image-tag changes or
-  configuration edits. The ix volume persists across recreation.
+  newer. It pulls the image, creates the ix volume (when that option is
+  used), starts and stops the container (SIGTERM, then SIGKILL after the
+  stop grace period), restarts it under its restart policy, and recreates
+  it on image-tag changes or configuration edits. The `/data` storage, ix
+  volume or host-path dataset, persists across recreation.
 
 ## Inputs and outputs
 
@@ -170,8 +176,13 @@ These replace CONTRACT-008's "Container deployment only" preconditions:
   published as a public package, so TrueNAS pulls it without registry
   credentials (TASK-033).
 - The app's storage includes a mount at `/data`. In the TrueNAS profile it is
-  an ix volume, created and managed by TrueNAS, with **Enable ACL** ticked
-  and an ACL entry granting the runtime UID (default `568`) **Modify**.
+  one of (amended 2026-11-02):
+  - an ix volume, created and managed by TrueNAS, with **Enable ACL** ticked
+    and an ACL entry granting the runtime UID (default `568`) **Modify**; or
+  - a host-path dataset the operator created in the TrueNAS UI, with no
+    inherited ACL entries (ACL stripped), owned by the runtime UID and GID,
+    and writable and enterable by the runtime UID (for example mode `755`),
+    mounted with Enable ACL unticked (§7.1).
 - The storage backing `/data` is local to the TrueNAS host, not a network
   share (CONTRACT-008 §6, S7).
 - The runtime UID is non-root (§7.3).
@@ -210,7 +221,9 @@ not enter them in the form:
 **`/data`.**
 
 - `/data` is an operator-provided mount. In the TrueNAS profile it is an ix
-  volume (Patrick's decision 8). The image never chooses the host-side
+  volume (Patrick's decision 8) or, amended 2026-11-02, a host-path dataset
+  prepared as in Preconditions (Resolved decision #2). The service's
+  behavior is identical for both. The image never chooses the host-side
   storage, and never causes an anonymous Docker volume or the container's
   writable layer to stand in for a missing mount.
 - If no operator storage is mounted at `/data`, startup fails closed. The
@@ -220,7 +233,7 @@ not enter them in the form:
   leave anything behind in `/data`.
 - The service never changes the owner, group, mode or ACL of `/data`. No
   minimum or maximum mode is required for `/data`. Its access control is
-  TrueNAS's ACL.
+  TrueNAS's ACL (ix volume) or the dataset's owner and mode (host path).
 - The only entry the service creates directly in `/data` is `pglite`.
 
 **`/data/pglite`.**
@@ -242,6 +255,12 @@ not enter them in the form:
   the app-created folder report a mode other than `0700`, that blocks
   TASK-025 and comes back as a contract change. This contract does not
   weaken §5 in advance (resolved question 2).
+- (Amended 2026-11-02.) On the ix volume, TASK-034 Phase 0 found the
+  app-created folder reports `0700`. On a host-path dataset created with
+  TrueNAS's **Apps** preset, the inherited ACL made it report `0770`, and
+  the service correctly refused to start. That is why the host-path option
+  requires the dataset's ACL to be stripped before first boot. §5's rule
+  is unchanged; no code change was needed.
 
 #### 7.2 Input channels
 
@@ -282,7 +301,7 @@ or tunnel plus direct LAN). The **local-only** profile is CONTRACT-013 §8.
 | Image | Repository and tag | `ghcr.io/mrdatawolf/btauthorchestrator`, a version tag `vX.Y.Z` (first release `v0.9.0`). No registry credentials. |
 | Security Context | User ID / Group ID | `568` / `568` by default, or another non-root pair matching the ACL on `/data` (§7.3). Not privileged. |
 | Ports | Container port, host port, Host IP, protocol | Container port = effective `PORT` (`3210` by default); host port of the operator's choice; Host IP = the TrueNAS static LAN IPv4 only; TCP. Never `0.0.0.0`, `::` or empty (CONTRACT-013 §1). |
-| Storage | `/data` | Type ix volume, Mount Path `/data`, **Enable ACL** ticked, ACL entry: User, ID = the runtime UID, **Modify**. |
+| Storage | `/data` | Either: Type ix volume, Mount Path `/data`, **Enable ACL** ticked, ACL entry: User, ID = the runtime UID, **Modify**. Or (amended 2026-11-02): Type Host Path, Mount Path `/data`, Host Path = the prepared dataset (Preconditions), **Enable ACL** unticked. |
 
 The tunnel token is configured on the connector machine, not in this form.
 
@@ -363,7 +382,7 @@ other copy of them.
   `secrets`, `signing_keys` or `local_users` was added, changed or removed.
 
 **After an image-tag change or configuration edit that recreates the
-container:** the ix volume, and with it every user, signing key and the
+container:** the `/data` storage, and with it every user, signing key and the
 stored `CLIENT_SECRET`, is unchanged. The seed step reports "already
 seeded".
 
@@ -491,6 +510,14 @@ files, plus local Docker checks, cover:
   users can sign in, `/.well-known/jwks.json` publishes the same `kid`, and
   the seed step reports "already seeded".
 - **Healthcheck** is healthy in the TrueNAS UI with proxy-only on.
+- **Host-path option (amended 2026-11-02).** The first-install and ACL-path
+  checks above apply to the ix volume. For a host-path dataset: created in
+  the TrueNAS UI (Apps preset; Traverse for `apps` on the parent if TrueNAS
+  requires it), ACL stripped, owner and group the runtime UID/GID; mounted
+  with Enable ACL unticked. The first boot seeds, the app shows healthy, and
+  `/data/pglite` is `0700`, owned by `568`. With the ACL not stripped, the
+  app refuses with the wrong-mode message. Verified by Patrick on TrueNAS,
+  2026-11-02.
 
 ## Resolved questions
 
@@ -517,7 +544,8 @@ Patrick accepted every drafted recommendation on 2026-10-29, with the
    that changes CONTRACT-008's seed interface and is specified separately
    (TASK-035).
 8. **Mount type:** documentation covers the ix volume only. The contract
-   stays neutral about the mount type.
+   stays neutral about the mount type. (Amended 2026-11-02: documentation
+   also covers the host-path dataset; see Resolved decision #2.)
 
 ## Resolved decisions
 
@@ -536,6 +564,11 @@ this contract's own.
    uninstalling with "remove ix volumes" ticked deletes signing keys and
    users. Snapshots and an off-box copy of `DB_ENCRYPTION_KEY` are the
    operator's responsibility.
+   Amended by Patrick (2026-11-02): a host-path dataset is equally allowed,
+   prepared as in Preconditions, so the database can be backed up, copied
+   and imported directly. It is the production setup. The "remove ix
+   volumes" risk does not apply to it; snapshots and the key backup remain
+   the operator's responsibility.
 3. **Image** (new). Decided by Patrick (2026-10-28, decisions 6 and 7).
    `ghcr.io/mrdatawolf/btauthorchestrator:vX.Y.Z`, published as a public
    package. First release tag `v0.9.0`.
@@ -544,3 +577,19 @@ this contract's own.
 5. **Runtime user** (restated). CONTRACT-008 OQ-5 stands: default `568:568`,
    another non-root ID allowed, root refused, never auto-`chown`. The override
    is now made through the form's Security Context.
+
+## Amendment log
+
+In-place amendments allowed by ADR-004. Each is approved by Patrick and
+changes no code behavior; amended passages are marked "(amended <date>)".
+
+- **2026-11-02, Patrick: host-path dataset storage.** `/data` may be a
+  host-path dataset as well as an ix volume (Purpose, Storage change #2,
+  Actors, Preconditions, §7.1, form table, Postconditions, Validation,
+  Resolved question 8, Resolved decision #2). Found during the first
+  production install: the Apps-preset dataset's inherited ACL made
+  `/data/pglite` report `0770`, which the service refused as required;
+  stripping the ACL fixed it. No change to the image, the service's checks
+  or its messages. The storage fix messages (§7.3) still name the ix-volume
+  Enable ACL fix; host-path operators follow `DOCKER.md` and
+  `docs/DEVELOPMENT.md`.

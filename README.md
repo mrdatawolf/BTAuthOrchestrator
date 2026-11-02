@@ -35,6 +35,9 @@ npm start
 fails closed at startup if any is missing or invalid — there is no silent
 default.
 
+## Installs
+see Docker.md for the process to install in TrueNAS or a straight Docker container.
+
 ## Commands
 
 | Command | Does |

@@ -26,3 +26,8 @@ the full rationale.
 - A supersession may replace a contract wholly or only a section of it —
   whichever leaves the resulting documents as coherent, unambiguous,
   point-in-time records; prefer whole-document supersession when in doubt.
+- **Exception ([ADR-004](../decisions/ADR-004-in-place-amendment-for-no-code-change-clarifications.md)):**
+  with Patrick's explicit approval, a change that needs no code change and
+  only widens or clarifies operator-facing options may be made in place. It
+  gets an `Amended:` header line, "(amended <date>)" markers on changed
+  passages, and an entry in the contract's `## Amendment log`.

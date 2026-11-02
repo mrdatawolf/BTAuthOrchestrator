@@ -881,3 +881,74 @@ without `TRUSTED_PROXIES` retain their current behavior.
 Validate with `node scripts/test-proxy-only.js` and
 `node scripts/test-trusted-proxies.js` after building on Node 22. Hardware,
 real tunnel and TrueNAS deployment checks belong to TASK-034.
+
+## Container CI and GHCR releases (TASK-033)
+
+`.github/workflows/container.yml` runs on pull requests, pushes to `master`,
+and tags matching `v*.*.*`. The read-only check job installs Node 22 dependencies
+with `npm ci`, builds, discovers every `scripts/test-*.js`, builds the Linux
+amd64 image with explicit `VERSION` and `REVISION` build arguments, and runs
+`bash scripts/test-container-image.sh bt-auth-ci:check`. PR/master runs never
+log in or push. Only the tag publish job receives `packages: write`; it first
+requires the tag to equal `v` plus `package.json` version. It rebuilds from the
+same commit and checks the exact release image before login with `GITHUB_TOKEN`.
+It pushes only `ghcr.io/mrdatawolf/btauthorchestrator:<tag>`, never `latest`.
+
+Run the Docker checks on a Docker host with Bash, Python 3 and curl installed:
+
+```sh
+docker build --platform linux/amd64 \
+  --build-arg VERSION="$(node -p 'require("./package.json").version')" \
+  --build-arg REVISION="$(git rev-parse HEAD)" -t bt-auth-ci:check .
+bash scripts/test-container-image.sh bt-auth-ci:check
+```
+
+Use a local Linux Docker engine or Docker Desktop with the temporary directory
+shared into its VM; a remote daemon cannot bind-mount the client's temporary
+files. The script creates isolated temporary data, generates fake test inputs,
+uses ephemeral loopback-only host ports, and removes its containers and data.
+Root helper containers prepare test permissions and clean up; the app itself
+runs as the image's `568:568`, except the intentional root-refusal test. Captured
+logs and row hashes are never dumped on failure. The script reports a failing
+line and deletes its scratch output. Do not run it with shell tracing enabled.
+Docker checks do not replace TASK-034's TrueNAS ACL and ingress validation.
+
+### Patrick's first release
+
+1. Review and merge the implementation and ensure TASK-032 is included before
+   tagging. Confirm `package.json` is `0.9.0` and the `master` workflow is green.
+   From that intended release commit, run `git tag v0.9.0`, then
+   `git push origin v0.9.0`. These are manual release actions, not CI setup steps.
+2. Watch **Actions → Container checks and release** for the tag. Both `check`
+   and `publish` must succeed. A version mismatch fails before registry login
+   or push. Retain the run URL as TASK-033 acceptance evidence.
+3. **One time, after the first successful push:** open GitHub's `mrdatawolf`
+   profile → Packages → `btauthorchestrator` → Package settings → Change
+   visibility → Public, and confirm. Patrick must perform this manual step;
+   the workflow does not change package visibility. Until then, anonymous
+   TrueNAS pulls can fail even when publication succeeded.
+4. On a Docker host, use a fresh empty client configuration to prove the pull
+   uses no stored registry credentials (do not use `sudo`, which can change
+   which configuration is read):
+
+   ```sh
+   anonymous_config=$(mktemp -d)
+   DOCKER_CONFIG="$anonymous_config" docker pull --platform linux/amd64 \
+     ghcr.io/mrdatawolf/btauthorchestrator:v0.9.0
+   rm -rf "$anonymous_config"
+   ```
+
+   Record the successful output and image digest with the run URL in TASK-033.
+   Green runs and an anonymous pull remain required acceptance evidence.
+
+For later releases, update package metadata consistently, merge and validate,
+then tag the matching version. Public visibility is normally a one-time step.
+No GitHub release object or `latest` image tag is created by this workflow.
+
+Action pins (verified by read-only `git ls-remote` against each release tag and
+its `^{}` peeled ref; these tags point directly to commits):
+
+| Action | Release tag | Commit SHA |
+|---|---|---|
+| `actions/checkout` | `v4.3.1` | `34e114876b0b11c390a56381ad16ebd13914f8d5` |
+| `actions/setup-node` | `v4.4.0` | `49933ea5288caeca8642d1e84afbd3f7d6820020` |

@@ -23,6 +23,10 @@ Tunnel replaces Caddy); these supersessions are carried forward by
 CONTRACT-013 after CONTRACT-012's retirement (2026-10-29). CONTRACT-014
 (approved 2026-10-29) for the container sections listed in its header,
 including the Preconditions bullet and Interfaces "Ingress" line above.
+CONTRACT-015 (approved 2026-11-02) for §4 (Bootstrap/seed interface) in
+full, the Scope exclusion on rotating `CLIENT_SECRET`, the third UX
+expectations bullet and Resolved decision #11 (generated `CLIENT_SECRET`
+placeholder for native local-login demos); §7.4 is unchanged.
 All other sections remain in force.
 
 ## Purpose

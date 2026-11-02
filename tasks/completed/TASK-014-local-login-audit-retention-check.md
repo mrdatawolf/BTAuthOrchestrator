@@ -105,15 +105,10 @@ for this analysis-only change. Required lifecycle moves remain blocked below.
 
 ## Blocker
 
-Analysis finished; lifecycle transition blocked by session filesystem permissions.
-The authorized `git mv tasks/approved/TASK-014-local-login-audit-retention-check.md
-tasks/in-progress/` failed with `Unable to create .../.git/index.lock:
-Read-only file system` (exit 128), before an untracked-file check. This session
-cannot write `.git`, and escalation is unavailable. No index state was changed;
-no filesystem-only rename was substituted. Patrick or a session with writable
-Git metadata must add this approved file alone if needed, then perform the
-approved → in-progress → review moves via `git mv`. Do not move to completed.
-Human authorization is already present; no further approval is requested.
+None. (2026-10-30: the earlier lifecycle-move blocker is cleared. Claude
+moved this file approved → in-progress → review on Patrick's instruction to
+work through the approved tasks; the analysis itself was finished
+2026-10-28.)
 
 The data dependency is only partially representative: historical testing rows
 exist, but just three active dates per table, with no recent October 27–28

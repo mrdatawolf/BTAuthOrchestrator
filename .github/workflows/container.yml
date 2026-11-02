@@ -1,0 +1,86 @@
+name: Container checks and release
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run every JavaScript test script
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(scripts/test-*.js)
+          for test in "${tests[@]}"; do
+            echo "Running $test"
+            node "$test"
+          done
+      - name: Build amd64 image with version and revision
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg VERSION="$(node -p 'require("./package.json").version')" \
+            --build-arg REVISION="$GITHUB_SHA" -t bt-auth-ci:check .
+      - run: bash scripts/test-container-image.sh bt-auth-ci:check
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Verify release tag matches package version before login or push
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node -e 'const v = require("./package.json").version; if (process.env.RELEASE_TAG !== "v" + v) { console.error("Release tag must equal v plus package.json version"); process.exit(1); }'
+      # Rebuild from the same commit, then check the exact image being pushed.
+      # This avoids transferring images or giving the PR job package write access.
+      - name: Build release image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg VERSION="${RELEASE_TAG#v}" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            -t "ghcr.io/mrdatawolf/btauthorchestrator:$RELEASE_TAG" .
+      - name: Check release image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/test-container-image.sh "ghcr.io/mrdatawolf/btauthorchestrator:$RELEASE_TAG"
+      - name: Publish version tag only
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "ghcr.io/mrdatawolf/btauthorchestrator:$RELEASE_TAG"

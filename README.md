@@ -120,3 +120,9 @@ rotation always needs its token. Deleting a user requires typing its username,
 and emergency rotation requires typing `ROTATE`.
 The console is not linked from public pages. See
 [development guidance](docs/DEVELOPMENT.md#browser-admin-console-contract-010).
+
+For a native `LOCAL_LOGIN=true` install, press Enter at the hidden
+`CLIENT_SECRET` prompt to generate a demo placeholder. See
+[Native demo seed and switching to Entra](docs/DEVELOPMENT.md#native-local-login-demo-seed-contract-015)
+for generation and placeholder-only replacement. Containers still require an
+operator-supplied `CLIENT_SECRET`.

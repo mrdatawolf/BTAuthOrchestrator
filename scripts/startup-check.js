@@ -69,6 +69,8 @@ async function check() {
     } catch {
       throw new Error(containerMode ? 'Required signing key or secret is missing or cannot be decrypted. Check DB_ENCRYPTION_KEY and seed inputs in Environment Variables, then restart the app.' : 'Required signing key or Entra secret is missing or cannot be decrypted. Check DB_ENCRYPTION_KEY; for incomplete bootstrap run npm run seed as the service user.');
     }
+    // The service emits the informational line once, after this preflight.
+    await require('../dist/clientSecretPlaceholder.js').checkClientSecretPlaceholder(store, config.localLogin);
     if (config.localLogin) {
       const result = await handle.database.query('SELECT 1 FROM local_users WHERE is_active = true LIMIT 1');
       if (result.rows.length === 0) {

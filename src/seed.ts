@@ -1,4 +1,4 @@
-import { generateKeyPair, randomUUID } from "node:crypto";
+import { generateKeyPair, randomBytes, randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import { promisify } from "node:util";
 
@@ -8,6 +8,7 @@ import { openDatabase, prepareDataDirectory, type DatabaseHandle } from "./datab
 import { createLocalUserStore } from "./localUsers.js";
 import { hashPassword } from "./password.js";
 import { createSecretsStore } from "./secrets.js";
+import { GENERATED_CLIENT_SECRET_PREFIX, isGeneratedClientSecret } from "./clientSecretPlaceholder.js";
 
 const generateKeyPairAsync = promisify(generateKeyPair);
 
@@ -68,25 +69,40 @@ function validateLocalUserPassword(raw: string): string {
 export async function main(arguments_: string[] = process.argv.slice(2)): Promise<void> {
   let databaseHandle: DatabaseHandle | undefined;
   try {
-    const { clientSecretFile, localUserFile, nonInteractive } = parseArguments(arguments_);
+    const { clientSecretFile, localUserFile, nonInteractive, generateClientSecret, replaceClientSecret } = parseArguments(arguments_);
     const config = loadConfig(process.env);
+    if (generateClientSecret && !config.localLogin) {
+      throw new Error("Generation is only for LOCAL_LOGIN=true. Supply the Entra client secret through the hidden prompt or --client-secret-file.");
+    }
     await prepareDataDirectory(config.pgliteDataDir);
 
     let clientSecretFromFile: string | undefined;
     if (clientSecretFile !== undefined) {
-      clientSecretFromFile = await readAndDeleteSecretFile(clientSecretFile);
+      clientSecretFromFile = validateOperatorSecret(await readAndDeleteSecretFile(clientSecretFile));
     }
 
-    // Read (and delete) the local-user input file unconditionally, before
+    // In normal bootstrap, read (and delete) the local-user input file before
     // the database is even opened — same convention as CLIENT_SECRET's own
     // file handling above: the file is consumed exactly once regardless of
     // whether local_users turns out to already be seeded (checked below).
     let localUserFromFile: LocalUserCredentials | undefined;
-    if (localUserFile !== undefined) {
+    if (!replaceClientSecret && localUserFile !== undefined) {
       localUserFromFile = await readAndDeleteLocalUserFile(localUserFile);
     }
 
     databaseHandle = await openDatabase(config.pgliteDataDir);
+    const store = createSecretsStore(databaseHandle.database, config.dbEncryptionKey);
+    if (replaceClientSecret) {
+      const existing = await databaseHandle.database.query("SELECT 1 FROM secrets WHERE name = 'CLIENT_SECRET'");
+      if (!existing.rows.length) throw new Error("No CLIENT_SECRET is stored. Run the normal seed first.");
+      if (!isGeneratedClientSecret(await store.getSecret("CLIENT_SECRET"))) {
+        throw new Error("Only a generated placeholder can be replaced by this command.");
+      }
+      const replacement = clientSecretFromFile ?? validateOperatorSecret(await promptHidden("CLIENT_SECRET: ", "CLIENT_SECRET"));
+      await store.setSecret("CLIENT_SECRET", replacement);
+      console.log("Generated CLIENT_SECRET placeholder replaced. Set LOCAL_LOGIN=false, TENANT_ID and CLIENT_ID in .env to use Microsoft Entra sign-in.");
+      return;
+    }
     const state = await databaseHandle.database.query<SeedStateRow>(
       `SELECT
          EXISTS (SELECT 1 FROM secrets WHERE name = 'CLIENT_SECRET') AS has_client_secret,
@@ -130,11 +146,28 @@ export async function main(arguments_: string[] = process.argv.slice(2)): Promis
       return;
     }
 
-    const store = createSecretsStore(databaseHandle.database, config.dbEncryptionKey);
     if (!hasClientSecret) {
-      const clientSecret = clientSecretFromFile ?? await promptHidden("CLIENT_SECRET: ", "CLIENT_SECRET");
-      await store.setSecret("CLIENT_SECRET", clientSecret);
-      console.log("CLIENT_SECRET stored.");
+      let clientSecret = clientSecretFromFile;
+      let generated = generateClientSecret;
+      if (clientSecret === undefined && !generated) {
+        if (config.localLogin && !nonInteractive) {
+          console.log("Microsoft Entra sign-in is off; CLIENT_SECRET is unused. Press Enter to generate a random placeholder that you can replace later.");
+        }
+        clientSecret = await promptHidden("CLIENT_SECRET: ", "CLIENT_SECRET");
+        generated = config.localLogin && !nonInteractive && !clientSecret.trim();
+      }
+      if (generated) {
+        try { clientSecret = GENERATED_CLIENT_SECRET_PREFIX + randomBytes(32).toString("base64url"); }
+        catch { throw new Error("Secure random generation failed; nothing was seeded."); }
+      } else if (!nonInteractive) {
+        clientSecret = validateOperatorSecret(clientSecret!);
+      }
+      await store.setSecret("CLIENT_SECRET", clientSecret!);
+      console.log(generated
+        ? "CLIENT_SECRET set to a generated placeholder (local login only). Before turning on Microsoft Entra sign-in, stop the service and run: node scripts/seed.js --replace-client-secret"
+        : "CLIENT_SECRET stored.");
+    } else if (generateClientSecret) {
+      console.log("CLIENT_SECRET already stored; skipping.");
     }
 
     if (!hasCurrentKey) {
@@ -186,7 +219,15 @@ export async function main(arguments_: string[] = process.argv.slice(2)): Promis
   }
 }
 
+function validateOperatorSecret(value: string): string {
+  if (!value.trim()) throw new Error("CLIENT_SECRET is empty. Supply the Entra client secret through the hidden prompt or --client-secret-file.");
+  if (isGeneratedClientSecret(value)) throw new Error("CLIENT_SECRET uses a reserved placeholder prefix. Supply an operator secret instead.");
+  return value;
+}
+
 interface ParsedArguments {
+  generateClientSecret: boolean;
+  replaceClientSecret: boolean;
   nonInteractive: boolean;
   clientSecretFile: string | undefined;
   localUserFile: string | undefined;
@@ -196,7 +237,11 @@ function parseArguments(arguments_: string[]): ParsedArguments {
   let clientSecretFile: string | undefined;
   let localUserFile: string | undefined;
   let nonInteractive = false;
+  let generateClientSecret = false;
+  let replaceClientSecret = false;
   for (const argument of arguments_) {
+    if (argument === "--generate-client-secret") { generateClientSecret = true; continue; }
+    if (argument === "--replace-client-secret") { replaceClientSecret = true; continue; }
     if (argument === "--non-interactive") { nonInteractive = true; continue; }
     if (argument.startsWith("--client-secret=")) {
       throw new Error("CLIENT_SECRET must not be supplied as a command-line value. Use the hidden prompt or --client-secret-file=<path>.");
@@ -225,11 +270,22 @@ function parseArguments(arguments_: string[]): ParsedArguments {
     }
     throw new Error("Unknown seed argument; no argument values are logged.");
   }
+  if ((generateClientSecret || replaceClientSecret) && (nonInteractive || isContainerMode())) {
+    throw new Error("--generate-client-secret and --replace-client-secret require native mode without --non-interactive.");
+  }
+  if (generateClientSecret && (replaceClientSecret || clientSecretFile !== undefined)) {
+    throw new Error("--generate-client-secret conflicts with --replace-client-secret and --client-secret-file.");
+  }
+  // Replacement touches only CLIENT_SECRET; refuse rather than leave an unread
+  // plaintext local-user file on disk.
+  if (replaceClientSecret && localUserFile !== undefined) {
+    throw new Error("--replace-client-secret does not accept --local-user-file.");
+  }
   if (isContainerMode() && !nonInteractive) throw new Error("Container seeding requires --non-interactive.");
   if (nonInteractive && (clientSecretFile !== undefined || localUserFile !== undefined)) {
     throw new Error("--non-interactive does not accept --client-secret-file or --local-user-file; use environment variables.");
   }
-  return { clientSecretFile, localUserFile, nonInteractive };
+  return { clientSecretFile, localUserFile, nonInteractive, generateClientSecret, replaceClientSecret };
 }
 
 async function readAndDeleteSecretFile(path: string): Promise<string> {

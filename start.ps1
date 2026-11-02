@@ -143,7 +143,8 @@ if ($DataDir -and (Test-Path -LiteralPath $DataDir -PathType Container)) {
 $SeedSteps = @"
 The database has not been seeded yet. From $AppDir run:
   npm run seed
-Answer its prompts (the Entra CLIENT_SECRET, then the first local user's
+Answer its prompts (the Entra CLIENT_SECRET, or press Enter with LOCAL_LOGIN=true
+to generate a replaceable demo placeholder, then the first local user's
 username, email and password), then run start.bat again.
 "@
 if ($DataDir -and -not ((Test-Path -LiteralPath $DataDir -PathType Container) -and

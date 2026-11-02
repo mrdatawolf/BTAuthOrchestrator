@@ -41,6 +41,7 @@ import {
 } from "./oidc.js";
 import { deriveDummyHashForTimingParity, hashPassword, verifyPassword } from "./password.js";
 import { createSecretsStore, type SecretsStore } from "./secrets.js";
+import { checkClientSecretPlaceholder } from "./clientSecretPlaceholder.js";
 import { mintSessionToken, nextLocalMidnightEpochSeconds } from "./tokens.js";
 
 const generateKeyPairAsync = promisify(generateKeyPair);
@@ -1839,6 +1840,9 @@ async function start(): Promise<void> {
     await prepareDataDirectory(config.pgliteDataDir);
     databaseHandle = await openDatabase(config.pgliteDataDir);
     const secretsStore = createSecretsStore(databaseHandle.database, config.dbEncryptionKey);
+    if (await checkClientSecretPlaceholder(secretsStore, config.localLogin)) {
+      console.info("CLIENT_SECRET is a generated placeholder; Microsoft Entra sign-in needs it replaced first (see docs).");
+    }
     const localUserStore = createLocalUserStore(databaseHandle.database);
     const listener = withIngressAdmission(withRequestMonitoring(createRequestHandler(secretsStore, config, localUserStore)), config);
     const server = createServer(listener);

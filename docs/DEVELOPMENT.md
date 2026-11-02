@@ -309,6 +309,53 @@ file is deleted immediately after it is read and before the database is opened.
 Never pass the secret itself on the command line. `npm run seed` is a convenience
 alias that builds first and then runs the same entry point.
 
+### Native local-login demo seed (CONTRACT-015)
+
+With `LOCAL_LOGIN=true`, press Enter at the hidden `CLIENT_SECRET` prompt
+(an entry containing only whitespace also counts as empty) to generate a
+placeholder. Microsoft Entra sign-in is off in this mode. For a native demo
+without a TTY, run:
+
+```sh
+node scripts/seed.js --generate-client-secret --local-user-file=<path>
+```
+
+The placeholder uses the fixed, non-secret prefix
+`orca-generated-placeholder.` followed by 32 cryptographically random bytes
+encoded as unpadded base64url. The complete value is stored only inside the
+encrypted `CLIENT_SECRET` row; it is never displayed or exported. Operator
+values starting with that prefix are reserved and refused. Empty operator
+input is refused, including every input file (after deletion), replacement,
+and the prompt with `LOCAL_LOGIN=false`. Files never request generation.
+
+`--generate-client-secret` requires `LOCAL_LOGIN=true`, conflicts with
+`--client-secret-file` and `--replace-client-secret`, and leaves an existing
+secret untouched. Normal fully seeded runs still exit non-zero.
+Both new flags are native-only and cannot be used with `--non-interactive`.
+Container installs always require an operator-supplied `CLIENT_SECRET`,
+including local-login demos; the container never generates it.
+
+### Switching a local-login demo to Microsoft Entra
+
+1. Stop the service.
+2. Run `node scripts/seed.js --replace-client-secret` and supply the real
+   Entra client secret at the hidden prompt, or use
+   `node scripts/seed.js --replace-client-secret --client-secret-file=<path>`.
+   The file is read and immediately deleted; deletion failure aborts the run.
+   Replacement accepts only a stored generated placeholder, changes only
+   that encrypted row, and preserves signing keys and local users. It cannot
+   rotate an operator-supplied secret. It works with either `LOCAL_LOGIN` value
+   and refuses `--local-user-file`.
+3. Set `LOCAL_LOGIN=false`, `TENANT_ID`, `CLIENT_ID`, and `SERVICE_ISSUER` in
+   `.env`. Use an issuer Entra accepts: HTTPS, or plain HTTP only for
+   `localhost` (CONTRACT-013 §8). Configure the matching Entra redirect URI.
+4. Start the service.
+
+Entra mode refuses startup while a placeholder remains. Local mode starts
+and logs one informational line. If moving native demo data into a container,
+replace the placeholder on the native install first, or use a new, empty
+`/data` volume. There is no container replacement command.
+
 Alongside `CLIENT_SECRET`/the signing key, `scripts/seed.js` also provisions
 the first `local_users` row (CONTRACT-005 §5, TASK-017), extending the same
 idempotent "what needs seeding" check with one more piece: on every
@@ -519,7 +566,8 @@ start.bat
 The first `start.bat` writes the key and tokens to `.env`, then stops
 because the database is not seeded. Check the other `.env` values (Entra IDs,
 `SERVICE_ISSUER`, `LOCAL_LOGIN`) before seeding. `npm run seed` prompts for
-the Entra `CLIENT_SECRET` and the first local user's username, email, and
+the Entra `CLIENT_SECRET` (or press Enter in local-login mode to generate a
+placeholder) and the first local user's username, email, and
 password. The second `start.bat` locks down the data directory and starts the
 service.
 
